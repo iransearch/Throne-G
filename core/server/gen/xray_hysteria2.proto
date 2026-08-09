@@ -1,0 +1,19 @@
+syntax = "proto2";
+package libcore;
+option go_package = "./;gen";
+
+// XrayHysteria2Config is an internal ThroneCore-only outbound config.
+// It is injected into Xray's compiled config as a typed message; the public
+// Xray JSON parser never sees this message directly.
+message XrayHysteria2Config {
+  required string server = 1;
+  optional uint32 server_port = 2 [default = 443];
+  repeated string server_ports = 3;
+  optional string hop_interval = 4;
+  optional int32 up_mbps = 5;
+  optional int32 down_mbps = 6;
+  optional string password = 7;
+  optional string obfs_type = 8;
+  optional string obfs_password = 9;
+  optional string tls_json = 10;
+}
