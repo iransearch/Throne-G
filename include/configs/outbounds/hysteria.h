@@ -14,6 +14,10 @@ namespace Configs
         int down_mbps = 0;
         QString obfs;
 
+        // Throne can run Hysteria2 either through sing-box (default) or through
+        // its embedded Xray instance using ThroneCore's custom Xray outbound.
+        QString core = "sing-box";
+
         // Hysteria1
         QString auth_type;
         QString auth;
@@ -30,6 +34,10 @@ namespace Configs
         hysteria()
         {
             tls->utls->supported = false;
+        }
+
+        bool IsXray() override {
+            return protocol_version == "2" && core == "xray";
         }
 
         bool HasTLS() override {
@@ -52,6 +60,7 @@ namespace Configs
         QJsonObject ExportToJson() override;
         QJsonObject ExportIdentity() override;
         BuildResult Build() override;
+        BuildResult BuildXray() override;
 
         QString DisplayType() override;
         SecurityInfo GetSecurity() override;
