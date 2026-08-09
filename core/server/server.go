@@ -275,16 +275,34 @@ func prepareTestEnv(current bool, needXray bool, xrayConfig string, xrayFullConf
 		}
 	}
 
+	// Build the throwaway sing-box first. Xray-backed test outbounds only dial
+	// their local SOCKS bridge when a probe actually starts, so the box can safely
+	// come up before the sidecar. This also gives Xray access to exactly the same
+	// DNS router and direct-domain bootstrap rules that the test box itself uses.
+	box, cancel, err := boxmain.Create([]byte(coreConfig))
+	if err != nil {
+		unwind()
+		return nil, err
+	}
+	cleanups = append(cleanups, func() {
+		box.CloseWithTimeout(cancel, 2*time.Second, log.Println, false)
+	})
+
 	if needXray {
 		instance, err := xray.CreateXrayInstance(xrayConfig)
 		if err != nil {
 			unwind()
 			return nil, err
 		}
-		// Egress only (no DNS): keep test egress off an active TUN, both the
-		// route it would take and the auto_redirect that would pull it back
-		// in regardless of route. See Start().
 		instance.SetEgress(currentEgress())
+		// Live Xray profiles resolve their proxy server domains through Throne's
+		// sing-box DNS. Test instances previously skipped that wiring and fell back
+		// to the OS resolver, which made Xray URL/IP/speed tests fail while the same
+		// Hysteria2 profile worked once started normally. Reuse the throwaway box's
+		// DNS router directly so tests and runtime have the same bootstrap path.
+		if dnsRouter := service.FromContext[adapter.DNSRouter](box.Context()); dnsRouter != nil {
+			instance.SetOutboundDNS(newSingBoxXrayDNS(box.Context(), dnsRouter), xinternet.ParseDomainStrategy("UseIP"))
+		}
 		if err = instance.Start(); err != nil {
 			_ = instance.Close()
 			unwind()
@@ -299,15 +317,6 @@ func prepareTestEnv(current bool, needXray bool, xrayConfig string, xrayFullConf
 		return nil, err
 	}
 	cleanups = append(cleanups, func() { closeXrayInstances(fullXray) })
-
-	box, cancel, err := boxmain.Create([]byte(coreConfig))
-	if err != nil {
-		unwind()
-		return nil, err
-	}
-	cleanups = append(cleanups, func() {
-		box.CloseWithTimeout(cancel, 2*time.Second, log.Println, false)
-	})
 
 	outTags := tags
 	if useDefaultOutbound {
@@ -673,7 +682,7 @@ func (s *server) QueryIPTest(ctx context.Context, in *gen.EmptyReq) (out *gen.Qu
 	return
 }
 
-func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (out *gen.QueryStatsResp, err error) {
+func (s *server) QueryStats(ctx context.Context, in *gen.QueryStatsResp) (out *gen.QueryStatsResp, err error) {
 	out = &gen.QueryStatsResp{}
 	out.Ups = make(map[string]int64)
 	out.Downs = make(map[string]int64)
