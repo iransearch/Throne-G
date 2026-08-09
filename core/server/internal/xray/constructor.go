@@ -2,23 +2,40 @@ package xray
 
 import (
 	"bytes"
+
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf/serial"
 )
 
-func CreateXrayInstance(config string) (*core.Instance, error) {
-	r := bytes.NewReader([]byte(config))
+func buildXrayConfig(config string) (*core.Config, error) {
+	patchedJSON, customOutbounds, err := prepareXrayCustomOutbounds(config)
+	if err != nil {
+		return nil, err
+	}
+
+	r := bytes.NewReader([]byte(patchedJSON))
 	conf, err := serial.DecodeJSONConfig(r)
 	if err != nil {
 		return nil, err
 	}
 
-	b, err := conf.Build()
+	built, err := conf.Build()
+	if err != nil {
+		return nil, err
+	}
+	if err := patchXrayCustomOutbounds(built, customOutbounds); err != nil {
+		return nil, err
+	}
+	return built, nil
+}
+
+func CreateXrayInstance(config string) (*core.Instance, error) {
+	built, err := buildXrayConfig(config)
 	if err != nil {
 		return nil, err
 	}
 
-	server, err := core.New(b)
+	server, err := core.New(built)
 	if err != nil {
 		return nil, err
 	}
@@ -27,18 +44,10 @@ func CreateXrayInstance(config string) (*core.Instance, error) {
 }
 
 // CheckXrayConfig validates an Xray JSON config without creating a running
-// instance. Decoding plus conf.Build() parses and validates the protocol
-// settings (UUIDs, flow, encryption, stream/TLS/reality settings, etc.), which
-// is everything that determines whether a profile is well-formed. It
-// deliberately stops short of core.New: that would instantiate a full set of
-// handlers just to throw them away, and validation runs concurrently (bulk
-// "remove invalid configs") while a live Xray instance is up.
+// instance. It also validates Throne's internal Hysteria2 marker and patches
+// the compiled config with the registered typed outbound message, but stops
+// short of core.New so concurrent validation does not instantiate handlers.
 func CheckXrayConfig(config string) error {
-	r := bytes.NewReader([]byte(config))
-	conf, err := serial.DecodeJSONConfig(r)
-	if err != nil {
-		return err
-	}
-	_, err = conf.Build()
+	_, err := buildXrayConfig(config)
 	return err
 }
