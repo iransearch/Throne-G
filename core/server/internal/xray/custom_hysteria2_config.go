@@ -13,6 +13,8 @@ import (
 	"github.com/xtls/xray-core/core"
 )
 
+const xrayLegacyHysteriaProtocol = "hysteria"
+
 type xrayHysteria2JSONObfs struct {
 	Type     string `json:"type"`
 	Password string `json:"password"`
@@ -28,6 +30,35 @@ type xrayHysteria2JSONSettings struct {
 	Password    string                 `json:"password"`
 	Obfs        *xrayHysteria2JSONObfs `json:"obfs"`
 	TLS         json.RawMessage        `json:"tls"`
+}
+
+// Older Xray Hysteria2 configs put authentication and TLS under streamSettings.
+// New Xray releases reject tlsSettings.allowInsecure before the Hysteria transport
+// is even built. Throne already owns a native Xray proxy.Outbound for Hysteria2,
+// so the compatibility adapter below moves only that removed legacy form onto the
+// custom outbound while preserving the original outbound tag used by balancers.
+type xrayLegacyHysteriaClientSettings struct {
+	Version int32  `json:"version"`
+	Address string `json:"address"`
+	Port    uint32 `json:"port"`
+}
+
+type xrayLegacyHysteriaTLSSettings struct {
+	ServerName    string          `json:"serverName"`
+	AllowInsecure *bool           `json:"allowInsecure"`
+	ALPN          json.RawMessage `json:"alpn,omitempty"`
+}
+
+type xrayLegacyHysteriaTransportSettings struct {
+	Version int32  `json:"version"`
+	Auth    string `json:"auth"`
+}
+
+type xrayLegacyHysteriaStreamSettings struct {
+	Network          string                                `json:"network"`
+	Security         string                                `json:"security"`
+	TLSSettings      xrayLegacyHysteriaTLSSettings         `json:"tlsSettings"`
+	HysteriaSettings xrayLegacyHysteriaTransportSettings   `json:"hysteriaSettings"`
 }
 
 func prepareXrayCustomOutbounds(config string) (string, map[string]*gen.XrayHysteria2Config, error) {
@@ -48,9 +79,33 @@ func prepareXrayCustomOutbounds(config string) (string, map[string]*gen.XrayHyst
 	changed := false
 	for index, outbound := range outbounds {
 		var protocol string
-		if err := json.Unmarshal(outbound["protocol"], &protocol); err != nil || protocol != xrayHysteria2Protocol {
+		if err := json.Unmarshal(outbound["protocol"], &protocol); err != nil {
 			continue
 		}
+
+		var settings *xrayHysteria2JSONSettings
+		stripLegacyStreamSettings := false
+		switch protocol {
+		case xrayHysteria2Protocol:
+			var customSettings xrayHysteria2JSONSettings
+			if err := json.Unmarshal(outbound["settings"], &customSettings); err != nil {
+				return "", nil, fmt.Errorf("xray custom outbound %d: invalid Hysteria2 settings: %w", index, err)
+			}
+			settings = &customSettings
+		case xrayLegacyHysteriaProtocol:
+			legacySettings, matched, err := translateLegacyXrayHysteria2(outbound)
+			if err != nil {
+				return "", nil, fmt.Errorf("xray legacy Hysteria2 outbound %d: %w", index, err)
+			}
+			if !matched {
+				continue
+			}
+			settings = legacySettings
+			stripLegacyStreamSettings = true
+		default:
+			continue
+		}
+
 		changed = true
 		var tag string
 		if err := json.Unmarshal(outbound["tag"], &tag); err != nil || strings.TrimSpace(tag) == "" {
@@ -59,18 +114,22 @@ func prepareXrayCustomOutbounds(config string) (string, map[string]*gen.XrayHyst
 		if _, exists := custom[tag]; exists {
 			return "", nil, fmt.Errorf("xray custom outbound: duplicate tag %q", tag)
 		}
-		var settings xrayHysteria2JSONSettings
-		if err := json.Unmarshal(outbound["settings"], &settings); err != nil {
-			return "", nil, fmt.Errorf("xray custom outbound %q: invalid Hysteria2 settings: %w", tag, err)
-		}
 		customConfig, err := settings.toProto()
 		if err != nil {
 			return "", nil, fmt.Errorf("xray custom outbound %q: %w", tag, err)
 		}
 		custom[tag] = customConfig
 
+		// Let Xray's normal JSON compiler create the outbound slot and all routing /
+		// observatory references by tag. The compiled proxy settings are replaced
+		// with XrayHysteria2Config after Build(). Legacy Hysteria streamSettings must
+		// not reach the compiler because its removed allowInsecure field is exactly
+		// what caused the load-balanced config to fail.
 		outbound["protocol"] = json.RawMessage(`"freedom"`)
 		outbound["settings"] = json.RawMessage(`{}`)
+		if stripLegacyStreamSettings {
+			delete(outbound, "streamSettings")
+		}
 	}
 	if !changed {
 		return config, nil, nil
@@ -85,6 +144,73 @@ func prepareXrayCustomOutbounds(config string) (string, map[string]*gen.XrayHyst
 		return "", nil, err
 	}
 	return string(patchedConfig), custom, nil
+}
+
+// translateLegacyXrayHysteria2 recognizes only the legacy form that current
+// Xray can no longer parse: Hysteria v2 + TLS + allowInsecure=true. Configs that
+// do not use the removed setting remain native Xray Hysteria configs unchanged.
+func translateLegacyXrayHysteria2(outbound map[string]json.RawMessage) (*xrayHysteria2JSONSettings, bool, error) {
+	var client xrayLegacyHysteriaClientSettings
+	if err := json.Unmarshal(outbound["settings"], &client); err != nil {
+		return nil, false, fmt.Errorf("invalid client settings: %w", err)
+	}
+	if client.Version != 2 {
+		return nil, false, nil
+	}
+
+	rawStream, ok := outbound["streamSettings"]
+	if !ok || len(bytes.TrimSpace(rawStream)) == 0 {
+		return nil, false, nil
+	}
+	var stream xrayLegacyHysteriaStreamSettings
+	if err := json.Unmarshal(rawStream, &stream); err != nil {
+		return nil, false, fmt.Errorf("invalid streamSettings: %w", err)
+	}
+	if stream.TLSSettings.AllowInsecure == nil || !*stream.TLSSettings.AllowInsecure {
+		return nil, false, nil
+	}
+
+	if strings.ToLower(strings.TrimSpace(stream.Network)) != "hysteria" {
+		return nil, true, fmt.Errorf("allowInsecure compatibility requires streamSettings.network=hysteria")
+	}
+	if strings.ToLower(strings.TrimSpace(stream.Security)) != "tls" {
+		return nil, true, fmt.Errorf("Hysteria2 requires streamSettings.security=tls")
+	}
+	if stream.HysteriaSettings.Version != 2 {
+		return nil, true, fmt.Errorf("hysteriaSettings.version must be 2")
+	}
+	if strings.TrimSpace(client.Address) == "" {
+		return nil, true, fmt.Errorf("missing server address")
+	}
+	if client.Port == 0 || client.Port > 65535 {
+		return nil, true, fmt.Errorf("invalid server port %d", client.Port)
+	}
+
+	tlsObject := map[string]json.RawMessage{
+		"enabled":  json.RawMessage(`true`),
+		"insecure": json.RawMessage(`true`),
+	}
+	if stream.TLSSettings.ServerName != "" {
+		serverName, err := json.Marshal(stream.TLSSettings.ServerName)
+		if err != nil {
+			return nil, true, err
+		}
+		tlsObject["server_name"] = serverName
+	}
+	if alpn := bytes.TrimSpace(stream.TLSSettings.ALPN); len(alpn) > 0 && !bytes.Equal(alpn, []byte("null")) {
+		tlsObject["alpn"] = append(json.RawMessage(nil), alpn...)
+	}
+	tlsJSON, err := json.Marshal(tlsObject)
+	if err != nil {
+		return nil, true, fmt.Errorf("encode TLS compatibility settings: %w", err)
+	}
+
+	return &xrayHysteria2JSONSettings{
+		Server:     client.Address,
+		ServerPort: client.Port,
+		Password:   stream.HysteriaSettings.Auth,
+		TLS:        tlsJSON,
+	}, true, nil
 }
 
 func (s xrayHysteria2JSONSettings) toProto() (*gen.XrayHysteria2Config, error) {
