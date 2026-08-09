@@ -1,8 +1,8 @@
-version: 1.2.3-gecko-split-{build}
+version: 1.2.4-gecko-split-{build}
 
 branches:
   only:
-    - feature/hysteria2-gecko
+    - feature/hysteria2-gecko-1.2.4
 
 skip_tags: true
 clone_depth: 1
@@ -19,7 +19,7 @@ environment:
       OPENSSL_ARCH: x64
       VCVARS: x64
       REQUIRE_CRONET: 1
-      ARTIFACT_NAME: Throne-1.2.3-gecko-windows64.zip
+      ARTIFACT_NAME: Throne-1.2.4-gecko-windows64.zip
     - TARGET_NAME: Windows 7 x64
       TARGET_KIND: legacy
       GOARCH_TARGET: amd64
@@ -29,7 +29,7 @@ environment:
       OPENSSL_ARCH: x64
       VCVARS: x64
       REQUIRE_CRONET: 0
-      ARTIFACT_NAME: Throne-1.2.3-gecko-windowslegacy64.zip
+      ARTIFACT_NAME: Throne-1.2.4-gecko-windowslegacy64.zip
     - TARGET_NAME: Windows 7 x86
       TARGET_KIND: legacy
       GOARCH_TARGET: 386
@@ -39,7 +39,7 @@ environment:
       OPENSSL_ARCH: x86
       VCVARS: x86
       REQUIRE_CRONET: 0
-      ARTIFACT_NAME: Throne-1.2.3-gecko-windows32.zip
+      ARTIFACT_NAME: Throne-1.2.4-gecko-windows32.zip
 
 build_script:
   - ps: |
@@ -224,7 +224,7 @@ build_script:
       7z a -tzip -mx=7 "%ARTIFACT_NAME%" ".\deployment\%DEST_SUFFIX%\*" || exit /b 1
 
 artifacts:
-  - path: Throne-1.2.3-gecko-*.zip
+  - path: Throne-1.2.4-gecko-*.zip
 
 test: off
 deploy: off
