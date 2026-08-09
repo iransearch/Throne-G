@@ -682,7 +682,7 @@ func (s *server) QueryIPTest(ctx context.Context, in *gen.EmptyReq) (out *gen.Qu
 	return
 }
 
-func (s *server) QueryStats(ctx context.Context, in *gen.QueryStatsResp) (out *gen.QueryStatsResp, err error) {
+func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (out *gen.QueryStatsResp, err error) {
 	out = &gen.QueryStatsResp{}
 	out.Ups = make(map[string]int64)
 	out.Downs = make(map[string]int64)
