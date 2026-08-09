@@ -17,6 +17,7 @@ void EditHysteria::onStart(std::shared_ptr<Configs::Profile> _ent) {
     auto outbound = _ent->Hysteria();
 
     ui->protocol_version->setCurrentText(outbound->protocol_version);
+    ui->core->setCurrentText(outbound->core == "xray" ? "xray" : "sing-box");
     ui->server_ports->setText(outbound->server_ports.join(","));
     ui->hop_interval->setText(outbound->hop_interval);
     ui->up_mbps->setText(Int2String(outbound->up_mbps));
@@ -35,6 +36,7 @@ void EditHysteria::onStart(std::shared_ptr<Configs::Profile> _ent) {
 bool EditHysteria::onEnd() {
     auto outbound = ent->Hysteria();
     outbound->protocol_version = ui->protocol_version->currentText();
+    outbound->core = outbound->protocol_version == "2" && ui->core->currentText() == "xray" ? "xray" : "sing-box";
     outbound->server_ports = SplitAndTrim(ui->server_ports->text(), ",", false);
     outbound->hop_interval = ui->hop_interval->text();
     outbound->up_mbps = ui->up_mbps->text().toInt();
@@ -53,6 +55,8 @@ bool EditHysteria::onEnd() {
 void EditHysteria::editHysteriaLayout(const QString& version) {
     if (version == "1")
     {
+        ui->core->setVisible(false);
+        ui->core_l->setVisible(false);
         ui->obfs_type->setVisible(false);
         ui->obfs_type_l->setVisible(false);
         ui->auth_type->setVisible(true);
@@ -68,6 +72,8 @@ void EditHysteria::editHysteriaLayout(const QString& version) {
         ui->password_l->setVisible(false);
     } else
     {
+        ui->core->setVisible(true);
+        ui->core_l->setVisible(true);
         ui->obfs_type->setVisible(true);
         ui->obfs_type_l->setVisible(true);
         ui->auth_type->setVisible(false);
