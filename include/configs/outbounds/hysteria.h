@@ -23,6 +23,7 @@ namespace Configs
 
         // Hysteria2
         QString password;
+        QString obfs_type = "salamander";
 
         std::shared_ptr<TLS> tls = std::make_shared<TLS>();
 

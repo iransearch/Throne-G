@@ -58,6 +58,10 @@ namespace Configs {
             } else {
                 password = url.userName() + ":" + url.password();
             }
+            if (query.hasQueryItem("obfs")) {
+                obfs_type = query.queryItemValue("obfs", QUrl::FullyDecoded).trimmed().toLower();
+            }
+            if (obfs_type.isEmpty()) obfs_type = "salamander";
             if (query.hasQueryItem("obfs-password")) {
                 obfs = query.queryItemValue("obfs-password", QUrl::FullyDecoded);
             }
@@ -111,9 +115,11 @@ namespace Configs {
         } else {
             if (object.contains("obfs")) {
                 auto obfsObj = object["obfs"].toObject();
+                if (obfsObj.contains("type")) obfs_type = obfsObj["type"].toString().trimmed().toLower();
                 if (obfsObj.contains("password")) obfs = obfsObj["password"].toString();
             }
             if (object.contains("obfsPassword")) obfs = object["obfsPassword"].toString();
+            if (obfs_type.isEmpty()) obfs_type = "salamander";
             if (object.contains("password")) password = object["password"].toString();
         }
         if (object.contains("tls")) tls->ParseFromJson(object["tls"].toObject());
@@ -185,6 +191,8 @@ namespace Configs {
             disable_mtu_discovery = object.disable_mtu_discovery;
         } else {
             if (!object.password.empty()) password = QString::fromStdString(object.password);
+            if (!object.obfs.empty()) obfs_type = QString::fromStdString(object.obfs).trimmed().toLower();
+            if (obfs_type.isEmpty()) obfs_type = "salamander";
             if (!object.obfs_password.empty()) obfs = QString::fromStdString(object.obfs_password);
         }
 
@@ -218,6 +226,7 @@ namespace Configs {
                 url.setUserName(password);
             }
             if (!obfs.isEmpty()) {
+                query.addQueryItem("obfs", obfs_type.isEmpty() ? "salamander" : obfs_type);
                 query.addQueryItem("obfs-password", QUrl::toPercentEncoding(obfs));
             }
         }
@@ -273,7 +282,7 @@ namespace Configs {
         } else {
             if (!obfs.isEmpty()) {
                 object["obfs"] = QJsonObject{
-                    {"type", "salamander"},
+                    {"type", obfs_type.isEmpty() ? "salamander" : obfs_type},
                     {"password", obfs},
                 };
             }
@@ -288,7 +297,10 @@ namespace Configs {
         auto object = outbound::ExportIdentity();
         object["protocol_version"] = protocol_version;
         if (!server_ports.isEmpty()) object["server_ports"] = server_ports.join(",");
-        if (!obfs.isEmpty()) object["obfs"] = true;
+        if (!obfs.isEmpty()) {
+            object["obfs"] = true;
+            if (protocol_version == "2") object["obfs_type"] = obfs_type.isEmpty() ? "salamander" : obfs_type;
+        }
         return object;
     }
 
@@ -313,7 +325,7 @@ namespace Configs {
         } else {
             if (!obfs.isEmpty()) {
                 object["obfs"] = QJsonObject{
-                    {"type", "salamander"},
+                    {"type", obfs_type.isEmpty() ? "salamander" : obfs_type},
                     {"password", obfs},
                 };
             }

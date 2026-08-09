@@ -1,0 +1,230 @@
+version: 1.2.3-gecko-split-{build}
+
+branches:
+  only:
+    - feature/hysteria2-gecko
+
+skip_tags: true
+clone_depth: 1
+image: Visual Studio 2022
+
+environment:
+  matrix:
+    - TARGET_NAME: Windows modern x64
+      TARGET_KIND: modern
+      GOARCH_TARGET: amd64
+      DEST_SUFFIX: windows-amd64
+      QT_VERSION: 6.11.1
+      QT_ARCH: x64
+      OPENSSL_ARCH: x64
+      VCVARS: x64
+      REQUIRE_CRONET: 1
+      ARTIFACT_NAME: Throne-1.2.3-gecko-windows64.zip
+    - TARGET_NAME: Windows 7 x64
+      TARGET_KIND: legacy
+      GOARCH_TARGET: amd64
+      DEST_SUFFIX: windowslegacy-amd64
+      QT_VERSION: 6.2.13
+      QT_ARCH: x64
+      OPENSSL_ARCH: x64
+      VCVARS: x64
+      REQUIRE_CRONET: 0
+      ARTIFACT_NAME: Throne-1.2.3-gecko-windowslegacy64.zip
+    - TARGET_NAME: Windows 7 x86
+      TARGET_KIND: legacy
+      GOARCH_TARGET: 386
+      DEST_SUFFIX: windowslegacy-386
+      QT_VERSION: 6.2.13
+      QT_ARCH: x86
+      OPENSSL_ARCH: x86
+      VCVARS: x86
+      REQUIRE_CRONET: 0
+      ARTIFACT_NAME: Throne-1.2.3-gecko-windows32.zip
+
+build_script:
+  - ps: |
+      $ErrorActionPreference = 'Stop'
+
+      function Assert-NativeSuccess([string]$step) {
+        if ($LASTEXITCODE -ne 0) {
+          throw "$step failed with exit code $LASTEXITCODE"
+        }
+      }
+
+      function Download-File([string]$url, [string]$path) {
+        Write-Host "Downloading $url"
+        & curl.exe -fLsS --retry 3 --retry-delay 2 -o $path $url
+        Assert-NativeSuccess "download $path"
+      }
+
+      $root = $env:APPVEYOR_BUILD_FOLDER
+      $tools = Join-Path $root '_tools'
+      $modernRoot = Join-Path $tools 'go-modern\go'
+      $protocRoot = Join-Path $tools 'protoc'
+      New-Item -ItemType Directory -Force $tools | Out-Null
+
+      Write-Host "Building independent target: $env:TARGET_NAME"
+      Write-Host 'Installing host Go 1.26.5 for Windows...'
+      New-Item -ItemType Directory -Force (Join-Path $tools 'go-modern') | Out-Null
+      Download-File 'https://go.dev/dl/go1.26.5.windows-amd64.zip' (Join-Path $tools 'go-modern.zip')
+      & 7z x (Join-Path $tools 'go-modern.zip') "-o$(Join-Path $tools 'go-modern')" -y | Out-Null
+      Assert-NativeSuccess 'extract modern Go'
+      $modernGo = Join-Path $modernRoot 'bin\go.exe'
+      if (-not (Test-Path $modernGo)) { throw "Modern Go not found: $modernGo" }
+      $env:GOROOT = $modernRoot
+      $env:GOTOOLCHAIN = 'local'
+      $env:PATH = "$modernRoot\bin;$env:USERPROFILE\go\bin;$env:PATH"
+      & $modernGo version
+      Assert-NativeSuccess 'modern Go version'
+
+      Write-Host 'Installing protoc 31.1 and Go generators...'
+      New-Item -ItemType Directory -Force $protocRoot | Out-Null
+      Download-File 'https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-win64.zip' (Join-Path $tools 'protoc.zip')
+      & 7z x (Join-Path $tools 'protoc.zip') "-o$protocRoot" -y | Out-Null
+      Assert-NativeSuccess 'extract protoc'
+      $env:PATH = "$protocRoot\bin;$env:PATH"
+      & (Join-Path $protocRoot 'bin\protoc.exe') --version
+      Assert-NativeSuccess 'protoc version'
+
+      $ErrorActionPreference = 'Continue'
+      & $modernGo install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      $protocGenGoExit = $LASTEXITCODE
+      & $modernGo install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+      $protocGenGrpcExit = $LASTEXITCODE
+      $ErrorActionPreference = 'Stop'
+      if ($protocGenGoExit -ne 0) { throw "install protoc-gen-go failed with exit code $protocGenGoExit" }
+      if ($protocGenGrpcExit -ne 0) { throw "install protoc-gen-go-grpc failed with exit code $protocGenGrpcExit" }
+
+      $coreGo = $modernGo
+      $coreGoRoot = $modernRoot
+      if ($env:TARGET_KIND -eq 'legacy') {
+        Write-Host 'Installing pinned Windows 7 Go toolchain...'
+        $legacyDir = Join-Path $tools 'go-legacy'
+        New-Item -ItemType Directory -Force $legacyDir | Out-Null
+        $legacyZip = Join-Path $tools 'go-legacy-win7.zip'
+        Download-File 'https://github.com/thongtech/go-legacy-win7/releases/download/v1.26.5-1/go-legacy-win7-1.26.5-1.windows_amd64.zip' $legacyZip
+        $legacyHash = (Get-FileHash $legacyZip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($legacyHash -ne 'c9d0c79dc2b408a4ea580b62a3d093a4219f9ff95316ef891dc987827e6900e3') {
+          throw "Legacy Go checksum mismatch: $legacyHash"
+        }
+        & 7z x $legacyZip "-o$legacyDir" -y | Out-Null
+        Assert-NativeSuccess 'extract legacy Go'
+        $legacyGoFile = Get-ChildItem $legacyDir -Recurse -Filter go.exe |
+          Where-Object { $_.FullName -match '\\bin\\go\.exe$' } |
+          Select-Object -First 1
+        if (-not $legacyGoFile) { throw 'Legacy Go bin\go.exe was not found after extraction.' }
+        $coreGo = $legacyGoFile.FullName
+        $coreGoRoot = Split-Path (Split-Path $coreGo -Parent) -Parent
+        $env:GOROOT = $coreGoRoot
+        & $coreGo version
+        Assert-NativeSuccess 'legacy Go version'
+      }
+
+      Write-Host 'Preparing pinned Gecko dependencies...'
+      Set-Location $root
+      New-Item -ItemType Directory -Force '_deps' | Out-Null
+      & git clone --quiet --no-checkout https://github.com/iransearch/sing-box.git _deps/sing-box
+      Assert-NativeSuccess 'clone sing-box'
+      & git -C _deps/sing-box checkout --quiet fd09ece82e44172cc4d511384379e88ff4e6b845
+      Assert-NativeSuccess 'checkout sing-box'
+      $singBoxHead = (& git -C _deps/sing-box rev-parse HEAD).Trim()
+      if ($singBoxHead -ne 'fd09ece82e44172cc4d511384379e88ff4e6b845') { throw "Unexpected sing-box HEAD: $singBoxHead" }
+
+      & git clone --quiet --no-checkout https://github.com/iransearch/sing-quic.git _deps/sing-quic
+      Assert-NativeSuccess 'clone sing-quic'
+      & git -C _deps/sing-quic checkout --quiet 3adc08d3a6bfc8ad1dc8296e4a8647861ec83ed9
+      Assert-NativeSuccess 'checkout sing-quic'
+      $singQuicHead = (& git -C _deps/sing-quic rev-parse HEAD).Trim()
+      if ($singQuicHead -ne '3adc08d3a6bfc8ad1dc8296e4a8647861ec83ed9') { throw "Unexpected sing-quic HEAD: $singQuicHead" }
+
+      Write-Host 'Applying local module replacements...'
+      $env:GOROOT = $modernRoot
+      Push-Location (Join-Path $root 'core\server')
+      & $modernGo mod edit '-replace=github.com/sagernet/sing-box=../../_deps/sing-box'
+      Assert-NativeSuccess 'replace sing-box'
+      & $modernGo mod edit '-replace=github.com/sagernet/sing-quic=../../_deps/sing-quic'
+      Assert-NativeSuccess 'replace sing-quic'
+      $ErrorActionPreference = 'Continue'
+      & $modernGo mod tidy
+      $goModTidyExit = $LASTEXITCODE
+      $ErrorActionPreference = 'Stop'
+      if ($goModTidyExit -ne 0) { throw "go mod tidy failed with exit code $goModTidyExit" }
+      Pop-Location
+
+      Write-Host 'Generating ThroneCore protobuf sources...'
+      Push-Location (Join-Path $root 'core\server\gen')
+      & (Join-Path $protocRoot 'bin\protoc.exe') -I . --go_out=. --go-grpc_out=. libcore.proto
+      Assert-NativeSuccess 'generate protobuf sources'
+      Pop-Location
+
+      $dest = Join-Path $root "deployment\$env:DEST_SUFFIX"
+      Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+      New-Item -ItemType Directory -Force $dest | Out-Null
+      $updaterArch = if ($env:GOARCH_TARGET -eq '386') { 'x86' } else { 'x64' }
+      Download-File "https://github.com/throneproj/updater/releases/latest/download/updater-windows-$updaterArch.exe" (Join-Path $dest 'updater.exe')
+      if ($env:REQUIRE_CRONET -eq '1') {
+        Download-File "https://github.com/SagerNet/cronet-go/releases/latest/download/libcronet-windows-$env:GOARCH_TARGET.dll" (Join-Path $dest 'libcronet.dll')
+      }
+
+      $env:GOROOT = $coreGoRoot
+      $env:GOTOOLCHAIN = 'local'
+      $env:GOOS = 'windows'
+      $env:GOARCH = $env:GOARCH_TARGET
+      $env:CGO_ENABLED = '0'
+      Push-Location (Join-Path $root 'core\server')
+      $ErrorActionPreference = 'Continue'
+      $singVersionOutput = & $coreGo list -m -f '{{.Version}}' github.com/sagernet/sing-box
+      $goListExit = $LASTEXITCODE
+      $ErrorActionPreference = 'Stop'
+      if ($goListExit -ne 0) { throw "query sing-box version failed with exit code $goListExit" }
+      $singVersion = ($singVersionOutput | Out-String).Trim()
+      $tags = 'with_clash_api,with_gvisor,with_quic,with_wireguard,with_utls,with_dhcp,with_tailscale,badlinkname,tfogo_checklinkname0'
+      if ($env:TARGET_KIND -eq 'modern') { $tags += ',with_purego,with_naive_outbound' }
+      $ldflags = "-w -s -X github.com/sagernet/sing-box/constant.Version=$singVersion -X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0"
+      $ErrorActionPreference = 'Continue'
+      & $coreGo build -v -o (Join-Path $dest 'ThroneCore.exe') -trimpath -ldflags $ldflags -tags $tags .
+      $goBuildExit = $LASTEXITCODE
+      $ErrorActionPreference = 'Stop'
+      if ($goBuildExit -ne 0) { throw "ThroneCore build failed with exit code $goBuildExit" }
+      Pop-Location
+
+      foreach ($file in @('ThroneCore.exe','updater.exe')) {
+        if (-not (Test-Path (Join-Path $dest $file))) { throw "Missing $file in $dest" }
+      }
+      if ($env:REQUIRE_CRONET -eq '1') {
+        if (-not (Test-Path (Join-Path $dest 'libcronet.dll'))) { throw 'Modern package is missing libcronet.dll.' }
+      } else {
+        if (Test-Path (Join-Path $dest 'libcronet.dll')) { throw 'Legacy package unexpectedly contains libcronet.dll.' }
+      }
+
+  - cmd: |
+      @echo on
+      if "%VCVARS%"=="x64" call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+      if "%VCVARS%"=="x86" call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars32.bat" || exit /b 1
+      cd /d "%APPVEYOR_BUILD_FOLDER%"
+      if exist Qt rmdir /s /q Qt
+      if exist openssl rmdir /s /q openssl
+      if exist build rmdir /s /q build
+      curl.exe -fLsS --retry 3 --retry-delay 2 -o qt.7z https://github.com/throneproj/buildqt/releases/download/Qt_%QT_VERSION%/Qt_%QT_VERSION%_%QT_ARCH%.7z || exit /b 1
+      curl.exe -fLsS --retry 3 --retry-delay 2 -o openssl.7z https://github.com/throneproj/env_windows_legacy/releases/download/latest/openssl_%OPENSSL_ARCH%.7z || exit /b 1
+      7z x qt.7z -y || exit /b 1
+      7z x openssl.7z -y || exit /b 1
+      set CMAKE_PREFIX_PATH=%APPVEYOR_BUILD_FOLDER%\Qt\lib\cmake
+      set OPENSSL_ROOT_DIR=%APPVEYOR_BUILD_FOLDER%\openssl
+      mkdir build
+      curl.exe -fLsS --retry 3 --retry-delay 2 -o build\srslist.h https://raw.githubusercontent.com/throneproj/routeprofiles/rule-set/srslist.h || exit /b 1
+      cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo || exit /b 1
+      ninja -C build || exit /b 1
+      copy /Y build\Throne.exe deployment\%DEST_SUFFIX%\Throne.exe || exit /b 1
+      if not exist deployment\%DEST_SUFFIX%\Throne.exe exit /b 1
+      if not exist deployment\%DEST_SUFFIX%\ThroneCore.exe exit /b 1
+      if not exist deployment\%DEST_SUFFIX%\updater.exe exit /b 1
+      if "%REQUIRE_CRONET%"=="1" if not exist deployment\%DEST_SUFFIX%\libcronet.dll exit /b 1
+      if "%REQUIRE_CRONET%"=="0" if exist deployment\%DEST_SUFFIX%\libcronet.dll exit /b 1
+      7z a -tzip -mx=7 "%ARTIFACT_NAME%" ".\deployment\%DEST_SUFFIX%\*" || exit /b 1
+
+artifacts:
+  - path: Throne-1.2.3-gecko-*.zip
+
+test: off
+deploy: off

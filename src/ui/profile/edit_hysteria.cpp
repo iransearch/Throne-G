@@ -21,6 +21,7 @@ void EditHysteria::onStart(std::shared_ptr<Configs::Profile> _ent) {
     ui->hop_interval->setText(outbound->hop_interval);
     ui->up_mbps->setText(Int2String(outbound->up_mbps));
     ui->down_mbps->setText(Int2String(outbound->down_mbps));
+    ui->obfs_type->setCurrentText(outbound->obfs_type.isEmpty() ? "salamander" : outbound->obfs_type);
     ui->obfs->setText(outbound->obfs);
     ui->auth_type->setCurrentText(outbound->auth_type);
     ui->auth->setText(outbound->auth);
@@ -38,6 +39,7 @@ bool EditHysteria::onEnd() {
     outbound->hop_interval = ui->hop_interval->text();
     outbound->up_mbps = ui->up_mbps->text().toInt();
     outbound->down_mbps = ui->down_mbps->text().toInt();
+    outbound->obfs_type = ui->obfs_type->currentText();
     outbound->obfs = ui->obfs->text();
     outbound->auth_type = ui->auth_type->currentText();
     outbound->auth = ui->auth->text();
@@ -51,6 +53,8 @@ bool EditHysteria::onEnd() {
 void EditHysteria::editHysteriaLayout(const QString& version) {
     if (version == "1")
     {
+        ui->obfs_type->setVisible(false);
+        ui->obfs_type_l->setVisible(false);
         ui->auth_type->setVisible(true);
         ui->auth_type_l->setVisible(true);
         ui->auth->setVisible(true);
@@ -64,6 +68,8 @@ void EditHysteria::editHysteriaLayout(const QString& version) {
         ui->password_l->setVisible(false);
     } else
     {
+        ui->obfs_type->setVisible(true);
+        ui->obfs_type_l->setVisible(true);
         ui->auth_type->setVisible(false);
         ui->auth_type_l->setVisible(false);
         ui->auth->setVisible(false);
