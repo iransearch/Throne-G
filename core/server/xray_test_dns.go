@@ -46,7 +46,6 @@ func (r *singBoxXrayDNS) LookupIP(domain string, option xdns.IPOption) ([]xnet.I
 	defer cancel()
 	addresses, err := r.router.Lookup(ctx, domain, adapter.DNSQueryOptions{
 		Strategy: strategy,
-		Timeout:  xrayTestDNSLookupTimeout,
 	})
 	if err != nil {
 		return nil, 0, err
