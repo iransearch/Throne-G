@@ -9,7 +9,7 @@
 namespace Configs {
     QStringList portsToPorts(const QStringList &ports) {
         QStringList result;
-        
+
         for (const QString &v : ports) {
             QStringList range = v.split(QRegularExpression("[:-]"));
 
@@ -19,7 +19,7 @@ namespace Configs {
                 result.append(QString("%1:%2").arg(v, v));
             }
         }
-        
+
         return result;
     }
 
@@ -40,7 +40,8 @@ namespace Configs {
         auto query = QUrlQuery(url.query());
 
         outbound::ParseFromLink(link);
-        
+        core = "sing-box";
+
         if (url.scheme() == "hysteria") {
             protocol_version = "1";
             if (query.hasQueryItem("obfsParam")) obfs = query.queryItemValue("obfsParam", QUrl::FullyDecoded);
@@ -66,17 +67,17 @@ namespace Configs {
                 obfs = query.queryItemValue("obfs-password", QUrl::FullyDecoded);
             }
         }
-        
+
         if (query.hasQueryItem("upmbps")) up_mbps = query.queryItemValue("upmbps").toInt();
         if (query.hasQueryItem("downmbps")) down_mbps = query.queryItemValue("downmbps").toInt();
         if (query.hasQueryItem("hop_interval")) hop_interval = query.queryItemValue("hop_interval");
         if (query.hasQueryItem("mport")) {
             server_ports = portsToPorts(query.queryItemValue("mport", QUrl::FullyDecoded).split(","));
         }
-        
+
         tls->ParseFromLink(link);
         tls->enabled = true; // Hysteria always uses tls
-        
+
         if (server_port == 0 && server_ports.isEmpty()) server_port = 443;
 
         return true;
@@ -93,6 +94,7 @@ namespace Configs {
             return false;
         }
         outbound::ParseFromJson(object);
+        core = protocol_version == "2" && object.value("core").toString().trimmed().toLower() == "xray" ? "xray" : "sing-box";
         if (object.contains("server_ports")) {
             server_ports = QJsonArray2QListString(object["server_ports"].toArray());
         }
@@ -136,6 +138,7 @@ namespace Configs {
             return false;
         }
         outbound::ParseFromClash(object);
+        core = "sing-box";
 
         if (!object.ports.empty()) server_ports = portsToPorts(QString::fromStdString(object.ports).split(QRegularExpression("[,/]"), Qt::SkipEmptyParts));
         auto anyToMbps = [](const QString &s) -> int {
@@ -207,7 +210,7 @@ namespace Configs {
         QUrlQuery query;
         url.setScheme(protocol_version == "1" ? "hysteria" : "hysteria2");
         url.setHost(server);
-        
+
         if (!name.isEmpty()) url.setFragment(name);
 
         if (protocol_version == "1") {
@@ -230,17 +233,17 @@ namespace Configs {
                 query.addQueryItem("obfs-password", QUrl::toPercentEncoding(obfs));
             }
         }
-        
+
         if (up_mbps > 0) query.addQueryItem("upmbps", QString::number(up_mbps));
         if (down_mbps > 0) query.addQueryItem("downmbps", QString::number(down_mbps));
-        
+
         if (!hop_interval.isEmpty()) query.addQueryItem("hop_interval", hop_interval);
-        
+
         mergeUrlQuery(query, tls->ExportToLink());
         mergeUrlQuery(query, outbound::ExportToLink());
-        
+
         if (!query.isEmpty()) url.setQuery(query);
-        
+
         QString result;
         if (!server_ports.isEmpty()) {
             QStringList portList;
@@ -257,7 +260,7 @@ namespace Configs {
             url.setPort(server_port);
             result = url.toString(QUrl::FullyEncoded);
         }
-        
+
         return result;
     }
 
@@ -287,6 +290,7 @@ namespace Configs {
                 };
             }
             if (!password.isEmpty()) object["password"] = password;
+            if (core == "xray") object["core"] = "xray";
         }
         object["tls"] = tls->ExportToJson();
         return object;
@@ -301,6 +305,7 @@ namespace Configs {
             object["obfs"] = true;
             if (protocol_version == "2") object["obfs_type"] = obfs_type.isEmpty() ? "salamander" : obfs_type;
         }
+        if (protocol_version == "2" && core == "xray") object["core"] = "xray";
         return object;
     }
 
@@ -332,6 +337,42 @@ namespace Configs {
             if (!password.isEmpty()) object["password"] = password;
         }
         object["tls"] = tls->Build().object;
+        return {object, ""};
+    }
+
+    BuildResult hysteria::BuildXray()
+    {
+        if (protocol_version != "2") {
+            return {{}, "Xray core mode supports Hysteria2 only"};
+        }
+        if (server.isEmpty()) {
+            return {{}, "Hysteria2 server is empty"};
+        }
+
+        auto tlsResult = tls->Build();
+        if (tlsResult.object.isEmpty()) {
+            return {{}, "Hysteria2 requires TLS"};
+        }
+
+        QJsonObject settings;
+        settings["server"] = server;
+        settings["server_port"] = server_port > 0 ? server_port : 443;
+        if (!server_ports.isEmpty()) settings["server_ports"] = QListStr2QJsonArray(portsToPorts(server_ports));
+        if (!hop_interval.isEmpty()) settings["hop_interval"] = hop_interval;
+        if (up_mbps > 0) settings["up_mbps"] = up_mbps;
+        if (down_mbps > 0) settings["down_mbps"] = down_mbps;
+        if (!password.isEmpty()) settings["password"] = password;
+        if (!obfs.isEmpty()) {
+            settings["obfs"] = QJsonObject{
+                {"type", obfs_type.isEmpty() ? "salamander" : obfs_type},
+                {"password", obfs},
+            };
+        }
+        settings["tls"] = tlsResult.object;
+
+        QJsonObject object;
+        object["protocol"] = "throne-hysteria2";
+        object["settings"] = settings;
         return {object, ""};
     }
 
