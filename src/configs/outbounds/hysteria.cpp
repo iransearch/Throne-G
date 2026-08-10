@@ -371,7 +371,7 @@ namespace Configs {
         settings["tls"] = tlsResult.object;
 
         QJsonObject object;
-        object["protocol"] = "throne-hysteria2";
+        object["protocol"] = "hysteria2";
         object["settings"] = settings;
         return {object, ""};
     }

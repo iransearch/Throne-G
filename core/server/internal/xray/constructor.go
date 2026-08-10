@@ -87,7 +87,7 @@ func addValidationTags(config string) string {
 	changed := false
 	for index, outbound := range outbounds {
 		var protocol string
-		if err := json.Unmarshal(outbound["protocol"], &protocol); err != nil || protocol != xrayHysteria2Protocol {
+		if err := json.Unmarshal(outbound["protocol"], &protocol); err != nil || !isCustomXrayHysteria2Protocol(protocol) {
 			continue
 		}
 		var tag string

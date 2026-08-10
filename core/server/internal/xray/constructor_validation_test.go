@@ -1,12 +1,17 @@
 package xray
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
-func TestCheckXrayConfigAcceptsUntaggedThroneHysteria2(t *testing.T) {
-	config := `{
+func TestCheckXrayConfigAcceptsUntaggedHysteria2Aliases(t *testing.T) {
+	for _, protocol := range []string{xrayHysteria2AliasProtocol, xrayHysteria2Protocol} {
+		t.Run(protocol, func(t *testing.T) {
+			config := fmt.Sprintf(`{
   "outbounds": [
     {
-      "protocol": "throne-hysteria2",
+      "protocol": %q,
       "settings": {
         "server": "hy2192.hy2any.info",
         "server_port": 8080,
@@ -23,9 +28,11 @@ func TestCheckXrayConfigAcceptsUntaggedThroneHysteria2(t *testing.T) {
       }
     }
   ]
-}`
+}`, protocol)
 
-	if err := CheckXrayConfig(config); err != nil {
-		t.Fatalf("untagged standalone Hysteria2 validation failed: %v", err)
+			if err := CheckXrayConfig(config); err != nil {
+				t.Fatalf("untagged standalone Hysteria2 validation failed for protocol %q: %v", protocol, err)
+			}
+		})
 	}
 }

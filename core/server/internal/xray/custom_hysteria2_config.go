@@ -13,7 +13,19 @@ import (
 	"github.com/xtls/xray-core/core"
 )
 
-const xrayLegacyHysteriaProtocol = "hysteria"
+const (
+	xrayLegacyHysteriaProtocol = "hysteria"
+	xrayHysteria2AliasProtocol = "hysteria2"
+)
+
+func isCustomXrayHysteria2Protocol(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case xrayHysteria2Protocol, xrayHysteria2AliasProtocol:
+		return true
+	default:
+		return false
+	}
+}
 
 type xrayHysteria2JSONObfs struct {
 	Type     string `json:"type"`
@@ -55,10 +67,10 @@ type xrayLegacyHysteriaTransportSettings struct {
 }
 
 type xrayLegacyHysteriaStreamSettings struct {
-	Network          string                                `json:"network"`
-	Security         string                                `json:"security"`
-	TLSSettings      xrayLegacyHysteriaTLSSettings         `json:"tlsSettings"`
-	HysteriaSettings xrayLegacyHysteriaTransportSettings   `json:"hysteriaSettings"`
+	Network          string                              `json:"network"`
+	Security         string                              `json:"security"`
+	TLSSettings      xrayLegacyHysteriaTLSSettings       `json:"tlsSettings"`
+	HysteriaSettings xrayLegacyHysteriaTransportSettings `json:"hysteriaSettings"`
 }
 
 func prepareXrayCustomOutbounds(config string) (string, map[string]*gen.XrayHysteria2Config, error) {
@@ -85,14 +97,14 @@ func prepareXrayCustomOutbounds(config string) (string, map[string]*gen.XrayHyst
 
 		var settings *xrayHysteria2JSONSettings
 		stripLegacyStreamSettings := false
-		switch protocol {
-		case xrayHysteria2Protocol:
+		switch {
+		case isCustomXrayHysteria2Protocol(protocol):
 			var customSettings xrayHysteria2JSONSettings
 			if err := json.Unmarshal(outbound["settings"], &customSettings); err != nil {
 				return "", nil, fmt.Errorf("xray custom outbound %d: invalid Hysteria2 settings: %w", index, err)
 			}
 			settings = &customSettings
-		case xrayLegacyHysteriaProtocol:
+		case protocol == xrayLegacyHysteriaProtocol:
 			legacySettings, matched, err := translateLegacyXrayHysteria2(outbound)
 			if err != nil {
 				return "", nil, fmt.Errorf("xray legacy Hysteria2 outbound %d: %w", index, err)
