@@ -1,5 +1,7 @@
 #include "include/ui/profile/edit_hysteria.h"
 
+#include <QTimer>
+
 EditHysteria::EditHysteria(QWidget *parent)
     : QWidget(parent),
       ui(new Ui::EditHysteria) {
@@ -31,6 +33,28 @@ void EditHysteria::onStart(std::shared_ptr<Configs::Profile> _ent) {
     ui->disable_mtu_discovery->setChecked(outbound->disable_mtu_discovery);
     ui->password->setText(outbound->password);
     editHysteriaLayout(outbound->protocol_version);
+
+    // Hysteria owns its transport and TLS settings even when the selected core
+    // is Xray. The generic Xray stream editor (network/security/mux) is not part
+    // of the throne-hysteria2 outbound and only exposes misleading controls.
+    // DialogEditProfile decides which core widgets to show before onStart(), so
+    // apply the Hysteria-specific chrome after that setup has completed.
+    QTimer::singleShot(0, this, [this] {
+        if (!get_edit_dialog) return;
+        auto *dialog = get_edit_dialog();
+        if (dialog == nullptr) return;
+
+        if (auto *widget = dialog->findChild<QWidget *>("xray_settings_box")) widget->hide();
+        if (auto *widget = dialog->findChild<QWidget *>("xray_widget")) widget->hide();
+
+        // Keep the normal Hysteria TLS controls visible. Individual Network /
+        // Security / Mux rows are still filtered by DialogEditProfile according
+        // to HasTransport(), HasTLS() and HasMux().
+        if (auto *widget = dialog->findChild<QWidget *>("stream_box")) widget->show();
+        if (auto *widget = dialog->findChild<QWidget *>("right_all_w")) widget->show();
+
+        dialog->adjustSize();
+    });
 }
 
 bool EditHysteria::onEnd() {
