@@ -5,6 +5,7 @@ import (
 
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf/serial"
+	xinternet "github.com/xtls/xray-core/transport/internet"
 )
 
 func buildXrayConfig(config string) (*core.Config, error) {
@@ -29,7 +30,13 @@ func buildXrayConfig(config string) (*core.Config, error) {
 	return built, nil
 }
 
+func hasThroneHysteria2Outbound(config string) bool {
+	_, customOutbounds, err := prepareXrayCustomOutbounds(config)
+	return err == nil && len(customOutbounds) > 0
+}
+
 func CreateXrayInstance(config string) (*core.Instance, error) {
+	hasCustomHysteria2 := hasThroneHysteria2Outbound(config)
 	built, err := buildXrayConfig(config)
 	if err != nil {
 		return nil, err
@@ -38,6 +45,16 @@ func CreateXrayInstance(config string) (*core.Instance, error) {
 	server, err := core.New(built)
 	if err != nil {
 		return nil, err
+	}
+
+	// Generated/live profiles replace this fallback with Throne's sing-box-backed
+	// resolver before Start(). Standalone Xray full configs used by URL/IP/speed
+	// tests do not have that preparation step; without a resolver the custom
+	// Hysteria2 outbound cannot bootstrap a domain-named server. Restrict the
+	// fallback to configs that actually contain Throne Hysteria2 so unrelated
+	// Xray protocols keep their existing behavior.
+	if hasCustomHysteria2 {
+		server.SetOutboundDNS(&systemDNSClient{}, xinternet.ParseDomainStrategy("UseIPv4"))
 	}
 
 	return server, nil
