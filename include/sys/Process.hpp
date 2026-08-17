@@ -20,6 +20,8 @@ namespace Configs_sys {
 
         void Kill();
 
+        // socketName remains in the signature only for source compatibility with
+        // the existing MainWindow constructor call; the Core no longer uses it.
         CoreProcess(const QString &core_path, const QString &socketName, bool debugMode);
 
         void Restart();
@@ -27,9 +29,6 @@ namespace Configs_sys {
         int start_profile_when_core_is_up = -1;
 
     private:
-        // Local socket is startup/restart notification only. RPC calls use the
-        // loopback ProtoRPC TCP port below.
-        QString m_socketName;
         int m_rpcPort = 19810;
         bool m_debugMode = false;
         bool show_stderr = false;
