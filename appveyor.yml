@@ -2,7 +2,7 @@ version: 1.2.4-gecko-xray-split-{build}
 
 branches:
   only:
-    - feature/hysteria2-gecko-xray-1.2.4
+    - agent/protorpc-irspeedy-parent-fix
 
 skip_tags: true
 clone_depth: 1
