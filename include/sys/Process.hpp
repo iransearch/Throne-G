@@ -27,10 +27,10 @@ namespace Configs_sys {
         int start_profile_when_core_is_up = -1;
 
     private:
-        // During the transport migration the local socket remains only as a
-        // startup-ready handshake. All RPC calls use the loopback gRPC port.
+        // Local socket is startup/restart notification only. RPC calls use the
+        // loopback ProtoRPC TCP port below.
         QString m_socketName;
-        int m_grpcPort = 19810;
+        int m_rpcPort = 19810;
         bool m_debugMode = false;
         bool show_stderr = false;
         bool failed_to_start = false;
