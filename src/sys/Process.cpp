@@ -36,9 +36,11 @@ namespace Configs_sys {
         // object. Close that legacy listener immediately: Core<->GUI transport is
         // ProtoRPC/TCP only. The application's separate single-instance server is
         // parented by qApp, not MainWindow, so it is unaffected.
-        for (auto *server : GetMainWindow()->findChildren<QLocalServer*>()) {
-            if (server->serverName().startsWith("throneIPC-")) server->close();
-        }
+        runOnUiThread([] {
+            for (auto *server : GetMainWindow()->findChildren<QLocalServer*>()) {
+                if (server->serverName().startsWith("throneIPC-")) server->close();
+            }
+        }, true);
 
         // Reserve the loopback TCP endpoint used by ProtoRPC. core_socket_name is
         // runtime-only and currently carries the endpoint string for the RPC client.
