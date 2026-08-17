@@ -2,7 +2,6 @@ package main
 
 import (
 	"ThroneCore/internal/boxmain"
-	"ThroneCore/ipc"
 	"ThroneCore/parentcheck"
 	"fmt"
 	"github.com/xtls/xray-core/core"
@@ -93,13 +92,6 @@ func RunCore() {
 	if err != nil || port < 1 || port > 65535 {
 		log.Fatalf("invalid THRONE_CORE_PORT %q", portStr)
 	}
-
-	// The local socket is only a startup/restart notification channel. RPC
-	// payloads never use it; all calls use the ProtoRPC framing over loopback TCP.
-	socketName := os.Getenv("THRONE_CORE_SOCKET")
-	if socketName == "" {
-		log.Fatal("THRONE_CORE_SOCKET not set")
-	}
 	debug = os.Getenv("THRONE_CORE_DEBUG") == "1"
 
 	parentcheck.CheckParentProcess()
@@ -126,32 +118,16 @@ func RunCore() {
 
 	boxmain.DisableColor()
 
-	// ProtoRPC data transport: one persistent GUI connection on loopback TCP.
+	// ProtoRPC is the only Core<->GUI transport: one persistent connection on
+	// loopback TCP with the framing implemented in dispatch.go.
 	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
 	if err != nil {
 		log.Fatalf("failed to listen for ProtoRPC: %v", err)
 	}
 	defer listener.Close()
 
-	// Notify the GUI that the TCP listener is ready. Keep this control connection
-	// alive until the GUI has connected to ProtoRPC so restart detection remains
-	// compatible with the existing GUI startup path.
-	var readiness net.Conn
-	for i := 0; i < 10; i++ {
-		readiness, err = ipc.ConnectIPC(socketName, parentcheck.ParentPID)
-		if err == nil {
-			break
-		}
-		log.Printf("startup notification attempt %d/10 failed: %v", i+1, err)
-		time.Sleep(500 * time.Millisecond)
-	}
-	if err != nil {
-		log.Fatalf("failed to notify GUI after 10 attempts: %v", err)
-	}
-
 	fmt.Printf("Core ProtoRPC listening at %v\n", listener.Addr())
 	conn, err := listener.Accept()
-	readiness.Close()
 	if err != nil {
 		log.Fatalf("failed to accept ProtoRPC client: %v", err)
 	}
