@@ -3,7 +3,12 @@
 #ifndef Q_MOC_RUN
 #include <core/server/gen/libcore.pb.h>
 #endif
+
 #include <QString>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 class QLocalSocket;
 
@@ -14,9 +19,10 @@ namespace API {
 
         ~Client();
 
-        // Adopt a freshly connected socket, replacing any previous
-        // connection. The Client itself is long-lived and never recreated.
-        void Reconnect(QLocalSocket *socket);
+        // The local socket is retained only as a startup-ready signal while the
+        // migration is in progress. RPC traffic itself is sent over gRPC/HTTP2
+        // to the loopback TCP endpoint prepared by CoreProcess.
+        void Reconnect(QLocalSocket *readinessSocket);
 
         // QString returns is error string
 
@@ -71,8 +77,18 @@ namespace API {
                                    const QString &member = {}) const;
 
     private:
-        class LocalSocketChannel;
-        std::unique_ptr<LocalSocketChannel> channel;
+        class GrpcTcpChannel;
+
+        static constexpr int CallOK = 0;
+        static constexpr int CallNotConnected = -1919;
+
+        int Call(const QString &methodName,
+                 const std::string &request,
+                 std::vector<uint8_t> &response,
+                 int timeoutMs = 0) const;
+
+        mutable std::mutex channelMutex;
+        std::shared_ptr<GrpcTcpChannel> channel;
     };
 
     inline Client *defaultClient;
