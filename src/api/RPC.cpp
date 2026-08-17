@@ -1,280 +1,50 @@
 #include "include/api/RPC.h"
+
 #include <utility>
 
 #include "include/global/Configs.hpp"
 
-#include <QLocalSocket>
-#include <QDataStream>
-#include <QAtomicInt>
-#include <QMap>
-#include <QMutex>
+#include <QAbstractNetworkCache>
+#include <QByteArray>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QObject>
 #include <QThread>
+#include <QTimer>
+#include <QtEndian>
 
-#include <mutex>
-#include <condition_variable>
 #include <chrono>
-#include <atomic>
+#include <condition_variable>
 #include <exception>
 #include <memory>
+#include <mutex>
 
 namespace API {
 
-    // -----------------------------------------------------------------------
-    // LocalSocketChannel — multiplexed framing over QLocalSocket
-    //
-    // Request wire format (little-endian):
-    //   [uint32: request ID]
-    //   [uint16: method name length][method name bytes]
-    //   [uint32: payload length][payload bytes]
-    //
-    // Response wire format (little-endian):
-    //   [uint32: request ID]
-    //   [uint8:  status (0=OK, 1=error)]
-    //   [uint32: data length][data bytes]
-    //
-    // The channel is created once and lives for the whole app. On core
-    // restart the *connection* is replaced via Reconnect(): the old socket
-    // is torn down and the new one adopted, all on the io_thread, while the
-    // channel object (and therefore `defaultClient`) stays stable so that
-    // worker threads calling into it never touch freed memory.
-    //
-    // `sock` and `read_buf` are io_thread-only state. All socket operations
-    // are dispatched as queued lambdas to `io_anchor`, a stable QObject that
-    // lives on io_thread for the channel's entire lifetime — callers never
-    // dereference `sock` directly, so swapping it cannot race with a write.
-    //
-    // PendingCall is owned through a shared_ptr held jointly by Call() and
-    // the `pending` map, so a timed-out / spuriously-woken Call() can never
-    // destroy it while the io_thread is still writing to it or notifying.
-    // -----------------------------------------------------------------------
-    class Client::LocalSocketChannel {
+    namespace {
+        constexpr auto GrpcAcceptEncodingHeader = "grpc-accept-encoding";
+        constexpr auto GrpcStatusHeader = "grpc-status";
+        constexpr auto GrpcStatusMessageHeader = "grpc-message";
+        constexpr auto TEHeader = "te";
+        constexpr int GrpcFrameHeaderSize = 5;
+        constexpr int DefaultRpcTimeoutMs = 30000;
 
-        struct PendingCall {
-            std::mutex          mu;
-            std::condition_variable cv;
-            bool                done   = false;
-            quint8              status = 1;     // default: error
-            QByteArray          data;
+        class NoCache final : public QAbstractNetworkCache {
+        public:
+            QNetworkCacheMetaData metaData(const QUrl &) override { return {}; }
+            void updateMetaData(const QNetworkCacheMetaData &) override {}
+            QIODevice *data(const QUrl &) override { return nullptr; }
+            bool remove(const QUrl &) override { return false; }
+            [[nodiscard]] qint64 cacheSize() const override { return 0; }
+            QIODevice *prepare(const QNetworkCacheMetaData &) override { return nullptr; }
+            void insert(QIODevice *) override {}
+            void clear() override {}
         };
 
-        QThread      *io_thread;
-        QObject      *io_anchor;          // stable dispatch target on io_thread
-        QLocalSocket *sock = nullptr;     // io_thread only
-        QByteArray    read_buf;           // io_thread only
-
-        QAtomicInt    next_id{1};         // monotonic across reconnects
-        std::mutex    pending_mu;
-        QMap<quint32, std::shared_ptr<PendingCall>> pending;
-
-        std::atomic<bool> connected_{false};
-
-        static constexpr int kIOTimeoutMs = 30000;
-
-    public:
-        // Call() status. Anything non-zero is a failed RPC.
-        static constexpr int CallOK = 0;
-        static constexpr int CallNotConnected = -1919;
-
-    private:
-
-        // Called on io_thread via readyRead
-        void onReadyRead() {
-            if (sock == nullptr) return;
-            read_buf += sock->readAll();
-            processBuffer();
-        }
-
-        void wakeAllWithError() {
-            connected_.store(false, std::memory_order_release);
-            std::lock_guard<std::mutex> lock(pending_mu);
-            for (auto &call : pending) {
-                std::lock_guard<std::mutex> cg(call->mu);
-                call->done = true;
-                call->cv.notify_one();
-            }
-            pending.clear();
-        }
-
-        // io_thread only
-        void processBuffer() {
-            // Parse as many complete response frames as possible.
-            // Response header: 4 (reqId) + 1 (status) + 4 (dataLen) = 9 bytes
-            while (read_buf.size() >= 9) {
-                quint32 reqId, dataLen;
-                quint8  status;
-                {
-                    QDataStream ds(read_buf);
-                    ds.setByteOrder(QDataStream::LittleEndian);
-                    ds >> reqId >> status >> dataLen;
-                }
-
-                qint64 totalSize = qint64(9) + dataLen;
-                if (read_buf.size() < totalSize) break;  // frame not yet complete
-
-                QByteArray data = read_buf.mid(9, static_cast<int>(dataLen));
-                read_buf.remove(0, totalSize);
-
-                std::shared_ptr<PendingCall> call;
-                {
-                    std::lock_guard<std::mutex> lock(pending_mu);
-                    call = pending.value(reqId, nullptr);
-                    if (call) pending.remove(reqId);
-                }
-                if (call) {
-                    // Hold call->mu across the notify so the cv/mutex cannot
-                    // be destroyed by a waking Call() mid-notification.
-                    std::lock_guard<std::mutex> cg(call->mu);
-                    call->status = status;
-                    call->data   = std::move(data);
-                    call->done   = true;
-                    call->cv.notify_one();
-                }
-            }
-        }
-
-    public:
-        LocalSocketChannel() {
-            io_thread = new QThread;
-            io_anchor = new QObject;
-            io_anchor->moveToThread(io_thread);
-            io_thread->start();
-        }
-
-        ~LocalSocketChannel() {
-            wakeAllWithError();
-
-            // Close socket and stop event loop on io_thread
-            QMetaObject::invokeMethod(io_anchor, [this]() {
-                if (sock) {
-                    sock->close();
-                    delete sock;
-                    sock = nullptr;
-                }
-                io_thread->quit();
-            }, Qt::QueuedConnection);
-
-            io_thread->wait();
-            delete io_anchor;   // safe: io_thread has finished
-            delete io_thread;
-        }
-
-        // Replace the underlying connection. Must be called on the thread that
-        // currently owns `newSock` (the UI thread, same as before).
-        void Reconnect(QLocalSocket *newSock) {
-            // Fail every in-flight call so blocked Call()s return an error.
-            wakeAllWithError();
-
-            // Hand the socket over to the io_thread.
-            newSock->setParent(nullptr);
-            newSock->moveToThread(io_thread);
-
-            // Swap on the io_thread. This is queued before any later write
-            // dispatch (FIFO), so a write that arrives after Reconnect always
-            // targets the new socket.
-            QMetaObject::invokeMethod(io_anchor, [this, newSock]() {
-                if (sock) {
-                    sock->disconnect(io_anchor);   // drop old readyRead/disconnected
-                    sock->close();
-                    sock->deleteLater();
-                }
-                sock = newSock;
-                read_buf.clear();
-                QObject::connect(sock, &QLocalSocket::readyRead, io_anchor,
-                    [this]() { onReadyRead(); });
-                QObject::connect(sock, &QLocalSocket::disconnected, io_anchor,
-                    [this]() { wakeAllWithError(); });
-                if (sock->bytesAvailable() > 0) onReadyRead();
-            }, Qt::QueuedConnection);
-
-            connected_.store(true, std::memory_order_release);
-        }
-
-        int Call(const QString &methodName, const std::string &req,
-                 std::vector<uint8_t> &rsp, int timeout_ms = 0) {
-            if (!connected_.load(std::memory_order_acquire)) return CallNotConnected;
-
-            const int ms = (timeout_ms > 0) ? timeout_ms : kIOTimeoutMs;
-
-            quint32 reqId = static_cast<quint32>(next_id.fetchAndAddOrdered(1));
-
-            // Build request frame
-            auto methodBytes = methodName.toUtf8();
-            auto reqBytes    = QByteArray::fromStdString(req);
-
-            QByteArray frame;
-            {
-                QDataStream ds(&frame, QIODevice::WriteOnly);
-                ds.setByteOrder(QDataStream::LittleEndian);
-                ds << reqId;
-                ds << static_cast<quint16>(methodBytes.size());
-                ds.writeRawData(methodBytes.constData(), methodBytes.size());
-                ds << static_cast<quint32>(reqBytes.size());
-                ds.writeRawData(reqBytes.constData(), reqBytes.size());
-            }
-
-            // Register before sending (never miss the response)
-            auto call = std::make_shared<PendingCall>();
-            {
-                std::lock_guard<std::mutex> lock(pending_mu);
-                pending[reqId] = call;
-            }
-
-            // Dispatch write through the stable io anchor (FIFO, never
-            // touches `sock` on this thread).
-            QMetaObject::invokeMethod(io_anchor, [this, frame]() {
-                if (sock) sock->write(frame);
-            }, Qt::QueuedConnection);
-
-            // Wait for response
-            std::unique_lock<std::mutex> lock(call->mu);
-            bool ok = call->cv.wait_for(lock,
-                std::chrono::milliseconds(ms),
-                [&call] { return call->done; });
-            lock.unlock();   // never hold call->mu while taking pending_mu
-
-            if (!ok) {
-                // Timed out — reclaim our slot unless processBuffer took it.
-                bool claimedByReader = false;
-                {
-                    std::lock_guard<std::mutex> plock(pending_mu);
-                    if (pending.remove(reqId) == 0) claimedByReader = true;
-                }
-                if (claimedByReader) {
-                    // A response is inbound; give it a brief bounded chance.
-                    lock.lock();
-                    ok = call->cv.wait_for(lock,
-                        std::chrono::milliseconds(ms),
-                        [&call] { return call->done; });
-                    lock.unlock();
-                }
-            }
-
-            std::lock_guard<std::mutex> g(call->mu);
-            if (!ok || call->status != 0) {
-                if (ok && call->status != 0) {
-                    MW_show_log("[Core error] " + QString::fromUtf8(call->data));
-                    // Surface the core's error payload to the caller too, so it can be
-                    // inspected instead of just logged (e.g. detecting missing Xray geo
-                    // assets when a Test/IPTest/SpeedTest RPC fails). Callers only read
-                    // `rsp` when the call succeeds, so this is inert for the rest.
-                    rsp.assign(call->data.begin(), call->data.end());
-                }
-                return 1;
-            }
-            rsp.assign(call->data.begin(), call->data.end());
-            return 0;
-        }
-    };
-
-    // -----------------------------------------------------------------------
-    // Client
-    // -----------------------------------------------------------------------
-
-    namespace {
-        // spb throws std::runtime_error on any malformed/torn input. These
-        // calls run on worker QThreads, so an uncaught throw would terminate
-        // the whole process. Turn a bad frame into a failed RPC instead.
+        // spb throws std::runtime_error on malformed/torn input. These calls run
+        // on worker threads too, so turn malformed responses into failed RPCs
+        // instead of terminating the process.
         template <typename T>
         bool tryDeserialize(const std::vector<uint8_t> &resp, T &out) {
             try {
@@ -290,164 +60,338 @@ namespace API {
         }
     }
 
-    Client::~Client() = default;
+    // -----------------------------------------------------------------------
+    // GrpcTcpChannel — protobuf RPC over gRPC/HTTP2 on 127.0.0.1:<port>
+    // -----------------------------------------------------------------------
+    class Client::GrpcTcpChannel {
+        struct PendingCall {
+            std::mutex mu;
+            std::condition_variable cv;
+            bool done = false;
+            int status = 1;
+            QByteArray data;
+        };
 
-    Client::Client() {
-        this->channel = std::make_unique<LocalSocketChannel>();
+        QThread *networkThread = nullptr;
+        QNetworkAccessManager *networkManager = nullptr;
+        QString urlBase;
+        QString serviceName;
+
+        static QByteArray makeGrpcFrame(const QByteArray &payload) {
+            QByteArray frame(GrpcFrameHeaderSize, '\0');
+            // byte 0 is the compression flag (0 = identity)
+            qToBigEndian<quint32>(static_cast<quint32>(payload.size()),
+                                  reinterpret_cast<uchar *>(frame.data() + 1));
+            frame += payload;
+            return frame;
+        }
+
+        static int processReply(QNetworkReply *reply, QByteArray &data) {
+            if (reply->error() != QNetworkReply::NoError) {
+                data = reply->errorString().toUtf8();
+                return static_cast<int>(reply->error());
+            }
+
+            const int grpcStatus = reply->rawHeader(GrpcStatusHeader).toInt();
+            if (grpcStatus != 0) {
+                const auto rawMessage = reply->rawHeader(GrpcStatusMessageHeader);
+                data = QByteArray::fromPercentEncoding(rawMessage);
+                if (data.isEmpty()) data = QByteArray("gRPC status ") + QByteArray::number(grpcStatus);
+                return 1000 + grpcStatus;
+            }
+
+            const QByteArray body = reply->readAll();
+            if (body.isEmpty()) {
+                data.clear();
+                return 0;
+            }
+            if (body.size() < GrpcFrameHeaderSize) {
+                data = "gRPC response frame is shorter than its header";
+                return 2001;
+            }
+
+            const auto compressed = static_cast<quint8>(body.at(0));
+            if (compressed != 0) {
+                data = "compressed gRPC responses are not supported by the GUI transport";
+                return 2002;
+            }
+
+            const quint32 payloadSize = qFromBigEndian<quint32>(
+                reinterpret_cast<const uchar *>(body.constData() + 1));
+            if (payloadSize > static_cast<quint32>(body.size() - GrpcFrameHeaderSize)) {
+                data = "truncated gRPC response frame";
+                return 2003;
+            }
+
+            data = body.mid(GrpcFrameHeaderSize, static_cast<int>(payloadSize));
+            return 0;
+        }
+
+    public:
+        GrpcTcpChannel(const QString &target, const QString &service)
+            : urlBase("http://" + target), serviceName(service) {
+            networkThread = new QThread;
+            networkManager = new QNetworkAccessManager;
+            networkManager->setCache(new NoCache);
+            networkManager->moveToThread(networkThread);
+            networkThread->start();
+        }
+
+        ~GrpcTcpChannel() {
+            if (networkManager != nullptr) {
+                networkManager->deleteLater();
+            }
+            if (networkThread != nullptr) {
+                networkThread->quit();
+                networkThread->wait();
+                delete networkThread;
+            }
+        }
+
+        int Call(const QString &methodName,
+                 const std::string &request,
+                 std::vector<uint8_t> &response,
+                 int timeoutMs = 0) {
+            response.clear();
+            if (!Configs::dataManager->settingsRepo->core_running) {
+                return Client::CallNotConnected;
+            }
+
+            const int effectiveTimeout = timeoutMs > 0 ? timeoutMs : DefaultRpcTimeoutMs;
+            const auto pending = std::make_shared<PendingCall>();
+            const QByteArray requestPayload = QByteArray::fromStdString(request);
+            const QString callUrl = urlBase + "/" + serviceName + "/" + methodName;
+
+            QMetaObject::invokeMethod(networkManager, [this, pending, requestPayload, callUrl, effectiveTimeout]() {
+                QNetworkRequest requestObject{QUrl(callUrl)};
+                requestObject.setAttribute(QNetworkRequest::Http2DirectAttribute, true);
+                requestObject.setHeader(QNetworkRequest::ContentTypeHeader, QLatin1String("application/grpc"));
+                requestObject.setRawHeader("Cache-Control", "no-store");
+                requestObject.setRawHeader(GrpcAcceptEncodingHeader, "identity");
+                requestObject.setRawHeader(TEHeader, "trailers");
+
+                QNetworkReply *reply = networkManager->post(requestObject, makeGrpcFrame(requestPayload));
+                auto *abortTimer = new QTimer(reply);
+                abortTimer->setSingleShot(true);
+                abortTimer->setInterval(effectiveTimeout);
+                QObject::connect(abortTimer, &QTimer::timeout, reply, &QNetworkReply::abort);
+                abortTimer->start();
+
+                QObject::connect(reply, &QNetworkReply::finished, networkManager, [pending, reply]() {
+                    QByteArray result;
+                    const int status = processReply(reply, result);
+                    {
+                        std::lock_guard<std::mutex> lock(pending->mu);
+                        pending->status = status;
+                        pending->data = std::move(result);
+                        pending->done = true;
+                    }
+                    pending->cv.notify_one();
+                    reply->deleteLater();
+                });
+            }, Qt::QueuedConnection);
+
+            std::unique_lock<std::mutex> lock(pending->mu);
+            const bool completed = pending->cv.wait_for(
+                lock,
+                std::chrono::milliseconds(effectiveTimeout + 1500),
+                [&pending] { return pending->done; });
+
+            if (!completed) {
+                const QByteArray msg = "gRPC/TCP call timed out";
+                response.assign(msg.begin(), msg.end());
+                return static_cast<int>(QNetworkReply::TimeoutError);
+            }
+
+            response.assign(pending->data.begin(), pending->data.end());
+            return pending->status;
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // Client
+    // -----------------------------------------------------------------------
+
+    Client::Client() = default;
+
+    Client::~Client() {
+        std::shared_ptr<GrpcTcpChannel> old;
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            old.swap(channel);
+        }
     }
 
-    void Client::Reconnect(QLocalSocket *socket) {
-        channel->Reconnect(socket);
+    void Client::Reconnect(QLocalSocket *readinessSocket) {
+        Q_UNUSED(readinessSocket)
+
+        const QString target = Configs::dataManager->settingsRepo->core_socket_name;
+        if (target.isEmpty() || !target.contains(':')) {
+            MW_show_log("[RPC] gRPC/TCP target is not configured");
+            return;
+        }
+
+        auto replacement = std::make_shared<GrpcTcpChannel>(target, "libcore.LibcoreService");
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            channel.swap(replacement);
+        }
+        MW_show_log("[RPC] gRPC/TCP connected target configured: " + target);
+    }
+
+    int Client::Call(const QString &methodName,
+                     const std::string &request,
+                     std::vector<uint8_t> &response,
+                     int timeoutMs) const {
+        std::shared_ptr<GrpcTcpChannel> current;
+        {
+            std::lock_guard<std::mutex> lock(channelMutex);
+            current = channel;
+        }
+        if (!current) {
+            response.clear();
+            return CallNotConnected;
+        }
+        return current->Call(methodName, request, response, timeoutMs);
     }
 
 #define NOT_OK      \
     *rpcOK = false; \
-    MW_show_log(QString("IPC call failed (code %1)\n").arg(status));
+    MW_show_log(QString("gRPC/TCP call failed (code %1)\n").arg(status));
 
     QString Client::Start(bool *rpcOK, const libcore::LoadConfigReq &request) {
         libcore::ErrorResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("Start", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("Start", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
-        } else {
-            NOT_OK
-            return "";
         }
+        NOT_OK
+        return "";
     }
 
     QString Client::Stop(bool *rpcOK) {
         libcore::EmptyReq request;
         libcore::ErrorResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("Stop", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("Stop", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
-        } else {
-            NOT_OK
-            return "";
         }
+        NOT_OK
+        return "";
     }
 
     libcore::QueryStatsResp Client::QueryStats() {
         libcore::EmptyReq request;
         libcore::QueryStatsResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QueryStats", spb::pb::serialize<std::string>(request), resp, 500);
+        const auto status = Call("QueryStats", spb::pb::serialize<std::string>(request), resp, 500);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
-            return reply;
-        }
+        if (status == CallOK && tryDeserialize(resp, reply)) return reply;
         return {};
     }
 
     libcore::TestResp Client::Test(bool *rpcOK, const libcore::TestReq &request, QString *coreError) {
         libcore::TestResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("Test", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("Test", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            if (coreError && !resp.empty())
-                *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
-            NOT_OK
-            return {};
         }
+        if (coreError && !resp.empty())
+            *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
+        NOT_OK
+        return {};
     }
 
     void Client::StopTests(bool *rpcOK) {
         const libcore::EmptyReq request;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("StopTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("StopTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK) {
+        if (status == CallOK) {
             *rpcOK = true;
-        } else {
-            NOT_OK
+            return;
         }
+        NOT_OK
     }
 
-    libcore::QueryURLTestResponse Client::QueryURLTest(bool *rpcOK)
-    {
+    libcore::QueryURLTestResponse Client::QueryURLTest(bool *rpcOK) {
         libcore::EmptyReq request;
         libcore::QueryURLTestResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QueryURLTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("QueryURLTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
 
     libcore::IPTestResp Client::IPTest(bool *rpcOK, const libcore::IPTestRequest &request, QString *coreError) {
         libcore::IPTestResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("IPTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("IPTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            if (coreError && !resp.empty())
-                *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
-            NOT_OK
-            return {};
         }
+        if (coreError && !resp.empty())
+            *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
+        NOT_OK
+        return {};
     }
 
     libcore::QueryIPTestResponse Client::QueryIPTest(bool *rpcOK) {
         libcore::EmptyReq request;
         libcore::QueryIPTestResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QueryIPTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("QueryIPTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
 
     libcore::GetDefaultInterfaceResponse Client::GetDefaultInterface(bool *rpcOK) const {
         libcore::EmptyReq request;
         libcore::GetDefaultInterfaceResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("GetDefaultInterface", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("GetDefaultInterface", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
 
     libcore::QueryAutoSelectorsResponse Client::QueryAutoSelectors(bool *rpcOK) const {
         libcore::EmptyReq request;
         libcore::QueryAutoSelectorsResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QueryAutoSelectors", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("QueryAutoSelectors", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
 
     QString Client::AutoSelectorAction(bool *rpcOK, const QString &tag, const QString &action,
@@ -458,152 +402,131 @@ namespace API {
         request.member = member.toStdString();
         libcore::ErrorResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("AutoSelectorAction", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("AutoSelectorAction", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
-        } else {
-            NOT_OK
-            return "IPC error";
         }
+        NOT_OK
+        return "gRPC/TCP error";
     }
 
     QString Client::SetSystemDNS(bool *rpcOK, const bool clear) const {
         libcore::SetSystemDNSRequest request{clear};
         std::vector<uint8_t> resp;
-        auto status = channel->Call("SetSystemDNS", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("SetSystemDNS", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK) {
+        if (status == CallOK) {
             *rpcOK = true;
             return "";
-        } else {
-            NOT_OK
-            return "IPC error";
         }
+        NOT_OK
+        return "gRPC/TCP error";
     }
 
-    libcore::QueryConnectionsResp Client::QueryConnections() const
-    {
+    libcore::QueryConnectionsResp Client::QueryConnections() const {
         libcore::EmptyReq request;
         libcore::QueryConnectionsResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QueryConnections", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("QueryConnections", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
-            return reply;
-        }
-        if (status != LocalSocketChannel::CallOK) MW_show_log("Failed to query connections: IPC error");
+        if (status == CallOK && tryDeserialize(resp, reply)) return reply;
+        if (status != CallOK) MW_show_log("Failed to query connections: gRPC/TCP error");
         return {};
     }
 
-    QString Client::CheckConfig(bool* rpcOK, const QString& config, bool isXray) const
-    {
+    QString Client::CheckConfig(bool *rpcOK, const QString &config, bool isXray) const {
         libcore::LoadConfigReq request;
-        if (isXray)
-        {
+        if (isXray) {
             request.need_xray = true;
             request.xray_config = config.toStdString();
-        } else
-        {
+        } else {
             request.core_config = config.toStdString();
         }
         libcore::ErrorResp reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("CheckConfig", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("CheckConfig", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply))
-        {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return QString::fromStdString(reply.error.value());
-        } else
-        {
-            NOT_OK
-            return "IPC error";
         }
+        NOT_OK
+        return "gRPC/TCP error";
     }
 
-    bool Client::IsPrivileged(bool* rpcOK) const
-    {
+    bool Client::IsPrivileged(bool *rpcOK) const {
         libcore::EmptyReq request;
         libcore::IsPrivilegedResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("IsPrivileged", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("IsPrivileged", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply))
-        {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply.has_privilege.value();
-        } else
-        {
-            NOT_OK
-            return false;
         }
+        NOT_OK
+        return false;
     }
 
-    libcore::SpeedTestResponse Client::SpeedTest(bool *rpcOK, const libcore::SpeedTestRequest &request, QString *coreError)
-    {
+    libcore::SpeedTestResponse Client::SpeedTest(bool *rpcOK, const libcore::SpeedTestRequest &request, QString *coreError) {
         libcore::SpeedTestResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("SpeedTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("SpeedTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            if (coreError && !resp.empty())
-                *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
-            NOT_OK
-            return {};
         }
+        if (coreError && !resp.empty())
+            *coreError = QString::fromUtf8(reinterpret_cast<const char *>(resp.data()), static_cast<int>(resp.size()));
+        NOT_OK
+        return {};
     }
 
-    libcore::QuerySpeedTestResponse Client::QueryCurrentSpeedTests(bool *rpcOK)
-    {
+    libcore::QuerySpeedTestResponse Client::QueryCurrentSpeedTests(bool *rpcOK) {
         const libcore::EmptyReq request;
         libcore::QuerySpeedTestResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QuerySpeedTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("QuerySpeedTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
 
-    libcore::QueryCountryTestResponse Client::QueryCountryTestResults(bool* rpcOK)
-    {
+    libcore::QueryCountryTestResponse Client::QueryCountryTestResults(bool *rpcOK) {
         const libcore::EmptyReq request;
         libcore::QueryCountryTestResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("QueryCountryTest", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("QueryCountryTest", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
 
-    libcore::GenWgKeyPairResponse Client::GenWgKeyPair(bool *rpcOK)
-    {
+    libcore::GenWgKeyPairResponse Client::GenWgKeyPair(bool *rpcOK) {
         const libcore::EmptyReq request;
         libcore::GenWgKeyPairResponse reply;
         std::vector<uint8_t> resp;
-        auto status = channel->Call("GenWgKeyPair", spb::pb::serialize<std::string>(request), resp);
+        const auto status = Call("GenWgKeyPair", spb::pb::serialize<std::string>(request), resp);
 
-        if (status == LocalSocketChannel::CallOK && tryDeserialize(resp, reply)) {
+        if (status == CallOK && tryDeserialize(resp, reply)) {
             *rpcOK = true;
             return reply;
-        } else {
-            NOT_OK
-            return {};
         }
+        NOT_OK
+        return {};
     }
+
+#undef NOT_OK
 
 } // namespace API
