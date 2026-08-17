@@ -16,13 +16,13 @@ import (
 
 var globalServer = &server{}
 
-// runDispatch reads request frames and dispatches each to its own goroutine.
+// runDispatch reads ProtoRPC request frames and dispatches each to its own goroutine.
 // Request:  [uint32 reqId][uint16 methodLen][method][uint32 payloadLen][payload]
 // Response: [uint32 reqId][uint8 status][uint32 dataLen][data]   (little-endian)
 func runDispatch(conn net.Conn) {
 	defer func() {
 		conn.Close()
-		log.Fatal("IPC connection dropped, exiting")
+		log.Fatal("ProtoRPC connection dropped, exiting")
 	}()
 
 	var writeMu sync.Mutex
@@ -146,5 +146,6 @@ func dispatch(methodName string, payload []byte) ([]byte, error) {
 	return h(context.Background(), payload)
 }
 
-// The wire path goes through the table above, not gRPC; keep the interface honest.
+// ProtoRPC uses the generated request/response messages and the same service
+// implementation without running a gRPC server.
 var _ gen.LibcoreServiceServer = globalServer
