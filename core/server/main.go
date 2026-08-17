@@ -13,6 +13,7 @@ import (
 	runtimeDebug "runtime/debug"
 	"runtime/metrics"
 	"runtime/pprof"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -84,6 +85,17 @@ func writeHeapProfile() (string, error) {
 }
 
 func RunCore() {
+	portStr := os.Getenv("THRONE_CORE_PORT")
+	if portStr == "" {
+		log.Fatal("THRONE_CORE_PORT not set")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		log.Fatalf("invalid THRONE_CORE_PORT %q", portStr)
+	}
+
+	// The local socket is only a startup/restart notification channel. RPC
+	// payloads never use it; all calls use the ProtoRPC framing over loopback TCP.
 	socketName := os.Getenv("THRONE_CORE_SOCKET")
 	if socketName == "" {
 		log.Fatal("THRONE_CORE_SOCKET not set")
@@ -114,22 +126,38 @@ func RunCore() {
 
 	boxmain.DisableColor()
 
-	// Connect to GUI IPC socket, retry up to 10 times
-	var conn net.Conn
-	var err error
+	// ProtoRPC data transport: one persistent GUI connection on loopback TCP.
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		log.Fatalf("failed to listen for ProtoRPC: %v", err)
+	}
+	defer listener.Close()
+
+	// Notify the GUI that the TCP listener is ready. Keep this control connection
+	// alive until the GUI has connected to ProtoRPC so restart detection remains
+	// compatible with the existing GUI startup path.
+	var readiness net.Conn
 	for i := 0; i < 10; i++ {
-		conn, err = ipc.ConnectIPC(socketName, parentcheck.ParentPID)
+		readiness, err = ipc.ConnectIPC(socketName, parentcheck.ParentPID)
 		if err == nil {
 			break
 		}
-		log.Printf("IPC connect attempt %d/10 failed: %v", i+1, err)
+		log.Printf("startup notification attempt %d/10 failed: %v", i+1, err)
 		time.Sleep(500 * time.Millisecond)
 	}
 	if err != nil {
-		log.Fatalf("failed to connect to GUI socket after 10 attempts: %v", err)
+		log.Fatalf("failed to notify GUI after 10 attempts: %v", err)
 	}
 
-	fmt.Println("Core Has Successfully Connected to Throne!")
+	fmt.Printf("Core ProtoRPC listening at %v\n", listener.Addr())
+	conn, err := listener.Accept()
+	readiness.Close()
+	if err != nil {
+		log.Fatalf("failed to accept ProtoRPC client: %v", err)
+	}
+	_ = listener.Close()
+
+	fmt.Println("Core ProtoRPC client connected")
 	runDispatch(conn)
 }
 
