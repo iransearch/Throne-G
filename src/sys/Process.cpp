@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QDir>
 #include <QApplication>
+#include <QLocalServer>
 
 #include <atomic>
 
@@ -28,8 +29,16 @@ namespace Configs_sys {
 
     CoreProcess::CoreProcess(const QString &core_path, const QString &socketName, bool debugMode)
         : m_debugMode(debugMode) {
-        Q_UNUSED(socketName)
+        Q_UNUSED(socketName);
         program = core_path;
+
+        // MainWindow still constructs its former Core QLocalServer before this
+        // object. Close that legacy listener immediately: Core<->GUI transport is
+        // ProtoRPC/TCP only. The application's separate single-instance server is
+        // parented by qApp, not MainWindow, so it is unaffected.
+        for (auto *server : GetMainWindow()->findChildren<QLocalServer*>()) {
+            if (server->serverName().startsWith("throneIPC-")) server->close();
+        }
 
         // Reserve the loopback TCP endpoint used by ProtoRPC. core_socket_name is
         // runtime-only and currently carries the endpoint string for the RPC client.
