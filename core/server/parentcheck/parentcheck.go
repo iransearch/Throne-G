@@ -28,7 +28,9 @@ func CheckParentProcess() {
 	parentBase := filepath.Base(parentPath)
 
 	if runtime.GOOS == "windows" {
-		if !strings.EqualFold(parentDir, selfDir) || !strings.EqualFold(parentBase, "Throne.exe") {
+		validParent := strings.EqualFold(parentBase, "Throne.exe") ||
+			strings.EqualFold(parentBase, "IRSpeedyVPN.exe")
+		if !strings.EqualFold(parentDir, selfDir) || !validParent {
 			log.Fatalf("parent check failed: unexpected parent %q, selfPath is %q", parentPath, selfPath)
 		}
 		return
