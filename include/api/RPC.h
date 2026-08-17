@@ -19,9 +19,8 @@ namespace API {
 
         ~Client();
 
-        // The local socket is retained only as a startup-ready signal while the
-        // migration is in progress. RPC traffic itself is sent over gRPC/HTTP2
-        // to the loopback TCP endpoint prepared by CoreProcess.
+        // The local socket is only the existing startup/restart notification.
+        // RPC traffic itself is ProtoRPC over loopback TCP.
         void Reconnect(QLocalSocket *readinessSocket);
 
         // QString returns is error string
@@ -77,7 +76,7 @@ namespace API {
                                    const QString &member = {}) const;
 
     private:
-        class GrpcTcpChannel;
+        class ProtoRpcTcpChannel;
 
         static constexpr int CallOK = 0;
         static constexpr int CallNotConnected = -1919;
@@ -88,7 +87,7 @@ namespace API {
                  int timeoutMs = 0) const;
 
         mutable std::mutex channelMutex;
-        std::shared_ptr<GrpcTcpChannel> channel;
+        std::shared_ptr<ProtoRpcTcpChannel> channel;
     };
 
     inline Client *defaultClient;
