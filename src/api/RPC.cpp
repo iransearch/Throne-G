@@ -4,16 +4,17 @@
 
 #include "include/global/Configs.hpp"
 
-#include <QAbstractNetworkCache>
+#include <QAtomicInt>
 #include <QByteArray>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
+#include <QDataStream>
+#include <QElapsedTimer>
+#include <QLocalSocket>
+#include <QMap>
 #include <QObject>
+#include <QTcpSocket>
 #include <QThread>
-#include <QTimer>
-#include <QtEndian>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
@@ -23,24 +24,7 @@
 namespace API {
 
     namespace {
-        constexpr auto GrpcAcceptEncodingHeader = "grpc-accept-encoding";
-        constexpr auto GrpcStatusHeader = "grpc-status";
-        constexpr auto GrpcStatusMessageHeader = "grpc-message";
-        constexpr auto TEHeader = "te";
-        constexpr int GrpcFrameHeaderSize = 5;
         constexpr int DefaultRpcTimeoutMs = 30000;
-
-        class NoCache final : public QAbstractNetworkCache {
-        public:
-            QNetworkCacheMetaData metaData(const QUrl &) override { return {}; }
-            void updateMetaData(const QNetworkCacheMetaData &) override {}
-            QIODevice *data(const QUrl &) override { return nullptr; }
-            bool remove(const QUrl &) override { return false; }
-            [[nodiscard]] qint64 cacheSize() const override { return 0; }
-            QIODevice *prepare(const QNetworkCacheMetaData &) override { return nullptr; }
-            void insert(QIODevice *) override {}
-            void clear() override {}
-        };
 
         // spb throws std::runtime_error on malformed/torn input. These calls run
         // on worker threads too, so turn malformed responses into failed RPCs
@@ -61,91 +45,154 @@ namespace API {
     }
 
     // -----------------------------------------------------------------------
-    // GrpcTcpChannel — protobuf RPC over gRPC/HTTP2 on 127.0.0.1:<port>
+    // ProtoRpcTcpChannel — protobuf messages with the legacy ProtoRPC framing
+    // over one persistent TCP connection to 127.0.0.1:<port>.
+    //
+    // Request (little-endian):
+    //   [uint32 reqId][uint16 methodLen][method][uint32 payloadLen][payload]
+    // Response (little-endian):
+    //   [uint32 reqId][uint8 status][uint32 dataLen][data]
     // -----------------------------------------------------------------------
-    class Client::GrpcTcpChannel {
+    class Client::ProtoRpcTcpChannel {
         struct PendingCall {
             std::mutex mu;
             std::condition_variable cv;
             bool done = false;
-            int status = 1;
+            quint8 status = 1;
             QByteArray data;
         };
 
-        QThread *networkThread = nullptr;
-        QNetworkAccessManager *networkManager = nullptr;
-        QString urlBase;
-        QString serviceName;
+        QThread *ioThread = nullptr;
+        QObject *ioAnchor = nullptr;
+        QTcpSocket *socket = nullptr; // ioThread only
+        QByteArray readBuffer;        // ioThread only
 
-        static QByteArray makeGrpcFrame(const QByteArray &payload) {
-            QByteArray frame(GrpcFrameHeaderSize, '\0');
-            // byte 0 is the compression flag (0 = identity)
-            qToBigEndian<quint32>(static_cast<quint32>(payload.size()),
-                                  reinterpret_cast<uchar *>(frame.data() + 1));
-            frame += payload;
-            return frame;
+        QAtomicInt nextId{1};
+        std::mutex pendingMutex;
+        QMap<quint32, std::shared_ptr<PendingCall>> pending;
+        std::atomic<bool> connected{false};
+
+        void wakeAllWithError() {
+            connected.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(pendingMutex);
+            for (auto &call : pending) {
+                std::lock_guard<std::mutex> callLock(call->mu);
+                call->done = true;
+                call->status = 1;
+                call->cv.notify_one();
+            }
+            pending.clear();
         }
 
-        static int processReply(QNetworkReply *reply, QByteArray &data) {
-            if (reply->error() != QNetworkReply::NoError) {
-                data = reply->errorString().toUtf8();
-                return static_cast<int>(reply->error());
-            }
+        // ioThread only
+        void processBuffer() {
+            // Response header: 4 (reqId) + 1 (status) + 4 (dataLen) = 9 bytes.
+            while (readBuffer.size() >= 9) {
+                quint32 reqId = 0;
+                quint32 dataLen = 0;
+                quint8 status = 1;
+                {
+                    QDataStream stream(readBuffer);
+                    stream.setByteOrder(QDataStream::LittleEndian);
+                    stream >> reqId >> status >> dataLen;
+                }
 
-            const int grpcStatus = reply->rawHeader(GrpcStatusHeader).toInt();
-            if (grpcStatus != 0) {
-                const auto rawMessage = reply->rawHeader(GrpcStatusMessageHeader);
-                data = QByteArray::fromPercentEncoding(rawMessage);
-                if (data.isEmpty()) data = QByteArray("gRPC status ") + QByteArray::number(grpcStatus);
-                return 1000 + grpcStatus;
-            }
+                const qint64 totalSize = qint64(9) + dataLen;
+                if (readBuffer.size() < totalSize) return;
 
-            const QByteArray body = reply->readAll();
-            if (body.isEmpty()) {
-                data.clear();
-                return 0;
-            }
-            if (body.size() < GrpcFrameHeaderSize) {
-                data = "gRPC response frame is shorter than its header";
-                return 2001;
-            }
+                QByteArray data = readBuffer.mid(9, static_cast<int>(dataLen));
+                readBuffer.remove(0, totalSize);
 
-            const auto compressed = static_cast<quint8>(body.at(0));
-            if (compressed != 0) {
-                data = "compressed gRPC responses are not supported by the GUI transport";
-                return 2002;
-            }
+                std::shared_ptr<PendingCall> call;
+                {
+                    std::lock_guard<std::mutex> lock(pendingMutex);
+                    call = pending.value(reqId, nullptr);
+                    if (call) pending.remove(reqId);
+                }
+                if (!call) continue;
 
-            const quint32 payloadSize = qFromBigEndian<quint32>(
-                reinterpret_cast<const uchar *>(body.constData() + 1));
-            if (payloadSize > static_cast<quint32>(body.size() - GrpcFrameHeaderSize)) {
-                data = "truncated gRPC response frame";
-                return 2003;
+                std::lock_guard<std::mutex> callLock(call->mu);
+                call->status = status;
+                call->data = std::move(data);
+                call->done = true;
+                call->cv.notify_one();
             }
-
-            data = body.mid(GrpcFrameHeaderSize, static_cast<int>(payloadSize));
-            return 0;
         }
 
     public:
-        GrpcTcpChannel(const QString &target, const QString &service)
-            : urlBase("http://" + target), serviceName(service) {
-            networkThread = new QThread;
-            networkManager = new QNetworkAccessManager;
-            networkManager->setCache(new NoCache);
-            networkManager->moveToThread(networkThread);
-            networkThread->start();
+        ProtoRpcTcpChannel() {
+            ioThread = new QThread;
+            ioAnchor = new QObject;
+            ioAnchor->moveToThread(ioThread);
+            ioThread->start();
         }
 
-        ~GrpcTcpChannel() {
-            if (networkManager != nullptr) {
-                networkManager->deleteLater();
+        ~ProtoRpcTcpChannel() {
+            wakeAllWithError();
+
+            if (ioThread && ioThread->isRunning()) {
+                QMetaObject::invokeMethod(ioAnchor, [this]() {
+                    if (socket) {
+                        socket->abort();
+                        delete socket;
+                        socket = nullptr;
+                    }
+                    readBuffer.clear();
+                }, Qt::BlockingQueuedConnection);
+                ioThread->quit();
+                ioThread->wait();
             }
-            if (networkThread != nullptr) {
-                networkThread->quit();
-                networkThread->wait();
-                delete networkThread;
-            }
+            delete ioAnchor;
+            delete ioThread;
+        }
+
+        bool Connect(const QString &host, quint16 port, int timeoutMs) {
+            bool ok = false;
+            QMetaObject::invokeMethod(ioAnchor, [this, host, port, timeoutMs, &ok]() {
+                if (socket) {
+                    socket->abort();
+                    delete socket;
+                    socket = nullptr;
+                }
+                readBuffer.clear();
+                connected.store(false, std::memory_order_release);
+
+                socket = new QTcpSocket;
+                QElapsedTimer elapsed;
+                elapsed.start();
+
+                // The core creates the listener before sending the readiness
+                // notification, but retry briefly to make restart/startup races
+                // harmless on slower Windows systems.
+                while (elapsed.elapsed() < timeoutMs) {
+                    socket->abort();
+                    socket->connectToHost(host, port);
+                    const int remaining = timeoutMs - static_cast<int>(elapsed.elapsed());
+                    const int waitMs = qMax(1, qMin(250, remaining));
+                    if (socket->waitForConnected(waitMs)) {
+                        ok = true;
+                        break;
+                    }
+                    QThread::msleep(50);
+                }
+
+                if (!ok) {
+                    delete socket;
+                    socket = nullptr;
+                    return;
+                }
+
+                QObject::connect(socket, &QTcpSocket::readyRead, ioAnchor, [this]() {
+                    if (!socket) return;
+                    readBuffer += socket->readAll();
+                    processBuffer();
+                });
+                QObject::connect(socket, &QTcpSocket::disconnected, ioAnchor, [this]() {
+                    wakeAllWithError();
+                });
+                connected.store(true, std::memory_order_release);
+            }, Qt::BlockingQueuedConnection);
+            return ok;
         }
 
         int Call(const QString &methodName,
@@ -153,58 +200,75 @@ namespace API {
                  std::vector<uint8_t> &response,
                  int timeoutMs = 0) {
             response.clear();
-            if (!Configs::dataManager->settingsRepo->core_running) {
-                return Client::CallNotConnected;
-            }
+            if (!connected.load(std::memory_order_acquire)) return Client::CallNotConnected;
 
             const int effectiveTimeout = timeoutMs > 0 ? timeoutMs : DefaultRpcTimeoutMs;
-            const auto pending = std::make_shared<PendingCall>();
-            const QByteArray requestPayload = QByteArray::fromStdString(request);
-            const QString callUrl = urlBase + "/" + serviceName + "/" + methodName;
+            const quint32 reqId = static_cast<quint32>(nextId.fetchAndAddRelaxed(1));
+            const QByteArray method = methodName.toUtf8();
+            const QByteArray payload = QByteArray::fromStdString(request);
 
-            QMetaObject::invokeMethod(networkManager, [this, pending, requestPayload, callUrl, effectiveTimeout]() {
-                QNetworkRequest requestObject{QUrl(callUrl)};
-                requestObject.setAttribute(QNetworkRequest::Http2DirectAttribute, true);
-                requestObject.setHeader(QNetworkRequest::ContentTypeHeader, QLatin1String("application/grpc"));
-                requestObject.setRawHeader("Cache-Control", "no-store");
-                requestObject.setRawHeader(GrpcAcceptEncodingHeader, "identity");
-                requestObject.setRawHeader(TEHeader, "trailers");
-
-                QNetworkReply *reply = networkManager->post(requestObject, makeGrpcFrame(requestPayload));
-                auto *abortTimer = new QTimer(reply);
-                abortTimer->setSingleShot(true);
-                abortTimer->setInterval(effectiveTimeout);
-                QObject::connect(abortTimer, &QTimer::timeout, reply, &QNetworkReply::abort);
-                abortTimer->start();
-
-                QObject::connect(reply, &QNetworkReply::finished, networkManager, [pending, reply]() {
-                    QByteArray result;
-                    const int status = processReply(reply, result);
-                    {
-                        std::lock_guard<std::mutex> lock(pending->mu);
-                        pending->status = status;
-                        pending->data = std::move(result);
-                        pending->done = true;
-                    }
-                    pending->cv.notify_one();
-                    reply->deleteLater();
-                });
-            }, Qt::QueuedConnection);
-
-            std::unique_lock<std::mutex> lock(pending->mu);
-            const bool completed = pending->cv.wait_for(
-                lock,
-                std::chrono::milliseconds(effectiveTimeout + 1500),
-                [&pending] { return pending->done; });
-
-            if (!completed) {
-                const QByteArray msg = "gRPC/TCP call timed out";
-                response.assign(msg.begin(), msg.end());
-                return static_cast<int>(QNetworkReply::TimeoutError);
+            QByteArray frame;
+            {
+                QDataStream stream(&frame, QIODevice::WriteOnly);
+                stream.setByteOrder(QDataStream::LittleEndian);
+                stream << reqId;
+                stream << static_cast<quint16>(method.size());
+                stream.writeRawData(method.constData(), method.size());
+                stream << static_cast<quint32>(payload.size());
+                stream.writeRawData(payload.constData(), payload.size());
             }
 
-            response.assign(pending->data.begin(), pending->data.end());
-            return pending->status;
+            auto call = std::make_shared<PendingCall>();
+            {
+                std::lock_guard<std::mutex> lock(pendingMutex);
+                pending[reqId] = call;
+            }
+
+            QMetaObject::invokeMethod(ioAnchor, [this, frame]() {
+                if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
+                    wakeAllWithError();
+                    return;
+                }
+                if (socket->write(frame) < 0) {
+                    wakeAllWithError();
+                    return;
+                }
+                socket->flush();
+            }, Qt::QueuedConnection);
+
+            std::unique_lock<std::mutex> lock(call->mu);
+            bool completed = call->cv.wait_for(
+                lock,
+                std::chrono::milliseconds(effectiveTimeout),
+                [&call] { return call->done; });
+            lock.unlock();
+
+            if (!completed) {
+                bool readerOwnsCall = false;
+                {
+                    std::lock_guard<std::mutex> pendingLock(pendingMutex);
+                    if (pending.remove(reqId) == 0) readerOwnsCall = true;
+                }
+                if (readerOwnsCall) {
+                    lock.lock();
+                    completed = call->cv.wait_for(
+                        lock,
+                        std::chrono::milliseconds(250),
+                        [&call] { return call->done; });
+                    lock.unlock();
+                }
+            }
+
+            std::lock_guard<std::mutex> callLock(call->mu);
+            if (!completed) return 2;
+
+            response.assign(call->data.begin(), call->data.end());
+            if (call->status != 0) {
+                if (!call->data.isEmpty())
+                    MW_show_log("[Core error] " + QString::fromUtf8(call->data));
+                return call->status;
+            }
+            return Client::CallOK;
         }
     };
 
@@ -215,7 +279,7 @@ namespace API {
     Client::Client() = default;
 
     Client::~Client() {
-        std::shared_ptr<GrpcTcpChannel> old;
+        std::shared_ptr<ProtoRpcTcpChannel> old;
         {
             std::lock_guard<std::mutex> lock(channelMutex);
             old.swap(channel);
@@ -226,24 +290,38 @@ namespace API {
         Q_UNUSED(readinessSocket)
 
         const QString target = Configs::dataManager->settingsRepo->core_socket_name;
-        if (target.isEmpty() || !target.contains(':')) {
-            MW_show_log("[RPC] gRPC/TCP target is not configured");
+        const int separator = target.lastIndexOf(':');
+        if (separator <= 0) {
+            MW_show_log("[RPC] ProtoRPC/TCP target is not configured");
             return;
         }
 
-        auto replacement = std::make_shared<GrpcTcpChannel>(target, "libcore.LibcoreService");
+        const QString host = target.left(separator);
+        bool portOk = false;
+        const int portValue = target.mid(separator + 1).toInt(&portOk);
+        if (!portOk || portValue < 1 || portValue > 65535) {
+            MW_show_log("[RPC] invalid ProtoRPC/TCP target: " + target);
+            return;
+        }
+
+        auto replacement = std::make_shared<ProtoRpcTcpChannel>();
+        if (!replacement->Connect(host, static_cast<quint16>(portValue), 5000)) {
+            MW_show_log("[RPC] failed to connect ProtoRPC/TCP target: " + target);
+            return;
+        }
+
         {
             std::lock_guard<std::mutex> lock(channelMutex);
             channel.swap(replacement);
         }
-        MW_show_log("[RPC] gRPC/TCP connected target configured: " + target);
+        MW_show_log("[RPC] ProtoRPC/TCP connected: " + target);
     }
 
     int Client::Call(const QString &methodName,
                      const std::string &request,
                      std::vector<uint8_t> &response,
                      int timeoutMs) const {
-        std::shared_ptr<GrpcTcpChannel> current;
+        std::shared_ptr<ProtoRpcTcpChannel> current;
         {
             std::lock_guard<std::mutex> lock(channelMutex);
             current = channel;
@@ -257,7 +335,7 @@ namespace API {
 
 #define NOT_OK      \
     *rpcOK = false; \
-    MW_show_log(QString("gRPC/TCP call failed (code %1)\n").arg(status));
+    MW_show_log(QString("ProtoRPC/TCP call failed (code %1)\n").arg(status));
 
     QString Client::Start(bool *rpcOK, const libcore::LoadConfigReq &request) {
         libcore::ErrorResp reply;
@@ -409,7 +487,7 @@ namespace API {
             return QString::fromStdString(reply.error.value());
         }
         NOT_OK
-        return "gRPC/TCP error";
+        return "ProtoRPC/TCP error";
     }
 
     QString Client::SetSystemDNS(bool *rpcOK, const bool clear) const {
@@ -422,7 +500,7 @@ namespace API {
             return "";
         }
         NOT_OK
-        return "gRPC/TCP error";
+        return "ProtoRPC/TCP error";
     }
 
     libcore::QueryConnectionsResp Client::QueryConnections() const {
@@ -432,7 +510,7 @@ namespace API {
         const auto status = Call("QueryConnections", spb::pb::serialize<std::string>(request), resp);
 
         if (status == CallOK && tryDeserialize(resp, reply)) return reply;
-        if (status != CallOK) MW_show_log("Failed to query connections: gRPC/TCP error");
+        if (status != CallOK) MW_show_log("Failed to query connections: ProtoRPC/TCP error");
         return {};
     }
 
@@ -453,7 +531,7 @@ namespace API {
             return QString::fromStdString(reply.error.value());
         }
         NOT_OK
-        return "gRPC/TCP error";
+        return "ProtoRPC/TCP error";
     }
 
     bool Client::IsPrivileged(bool *rpcOK) const {
