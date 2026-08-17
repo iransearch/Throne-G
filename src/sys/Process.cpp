@@ -23,14 +23,13 @@ namespace Configs_sys {
         : m_socketName(socketName), m_debugMode(debugMode) {
         program = core_path;
 
-        // Reserve a loopback port for the gRPC/HTTP2 transport. The legacy
-        // core_socket_name runtime field is reused as an endpoint string during
-        // the migration so the long-lived GUI RPC client can pick it up when the
-        // startup-ready pipe connects.
-        m_grpcPort = MkPort("127.0.0.1");
-        if (m_grpcPort <= 0) m_grpcPort = 19810;
+        // Reserve the loopback TCP endpoint used by ProtoRPC. core_socket_name is
+        // a runtime-only field; during this migration it carries the endpoint
+        // string consumed by the GUI RPC client after the readiness notification.
+        m_rpcPort = MkPort("127.0.0.1");
+        if (m_rpcPort <= 0) m_rpcPort = 19810;
         Configs::dataManager->settingsRepo->core_socket_name =
-            "127.0.0.1:" + QString::number(m_grpcPort);
+            "127.0.0.1:" + QString::number(m_rpcPort);
 
         connect(this, &QProcess::readyReadStandardOutput, this, [&]() {
             auto log = readAllStandardOutput();
@@ -99,10 +98,10 @@ namespace Configs_sys {
         started = true;
 
         auto env = QProcessEnvironment::systemEnvironment();
-        // Temporary startup-ready handshake. RPC payloads no longer use this
-        // local socket; they use THRONE_CORE_PORT via gRPC/HTTP2 on loopback.
+        // The local socket is only a startup/restart notification channel.
+        // RPC payloads use THRONE_CORE_PORT via ProtoRPC over loopback TCP.
         env.insert("THRONE_CORE_SOCKET", m_socketName);
-        env.insert("THRONE_CORE_PORT", QString::number(m_grpcPort));
+        env.insert("THRONE_CORE_PORT", QString::number(m_rpcPort));
         // Turns an unrecovered Go panic into a real abort, so it dumps all
         // goroutine stacks and WER captures a minidump of the core too.
         env.insert("GOTRACEBACK", "crash");
