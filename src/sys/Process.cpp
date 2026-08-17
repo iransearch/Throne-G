@@ -1,16 +1,23 @@
 #include "include/sys/Process.hpp"
 #include "include/global/Configs.hpp"
 #include "include/global/Logger.hpp"
+#include "include/api/RPC.h"
+#include "include/stats/traffic/TrafficLooper.hpp"
+#include "include/stats/autoselector/AutoSelectorMonitor.hpp"
 
 #include <QTimer>
 #include <QDir>
 #include <QApplication>
 
-
+#include <atomic>
 
 #include "include/ui/mainwindow.h"
 
 namespace Configs_sys {
+    namespace {
+        std::atomic_bool rpcLoopsStarted{false};
+    }
+
     CoreProcess::~CoreProcess() {
     }
 
@@ -20,12 +27,12 @@ namespace Configs_sys {
     }
 
     CoreProcess::CoreProcess(const QString &core_path, const QString &socketName, bool debugMode)
-        : m_socketName(socketName), m_debugMode(debugMode) {
+        : m_debugMode(debugMode) {
+        Q_UNUSED(socketName)
         program = core_path;
 
         // Reserve the loopback TCP endpoint used by ProtoRPC. core_socket_name is
-        // a runtime-only field; during this migration it carries the endpoint
-        // string consumed by the GUI RPC client after the readiness notification.
+        // runtime-only and currently carries the endpoint string for the RPC client.
         m_rpcPort = MkPort("127.0.0.1");
         if (m_rpcPort <= 0) m_rpcPort = 19810;
         Configs::dataManager->settingsRepo->core_socket_name =
@@ -59,6 +66,32 @@ namespace Configs_sys {
                                .arg(exitCode)
                                .arg(exitStatus == CrashExit ? "crash" : "normal")
                                .arg(Configs::dataManager->settingsRepo->prepare_exit ? " (during shutdown)" : ""));
+        });
+        connect(this, &QProcess::started, this, [this]() {
+            // No NamedPipe readiness handshake: connect the long-lived GUI client
+            // straight to the ProtoRPC listener. Reconnect() retries startup races.
+            API::defaultClient->Reconnect(nullptr);
+
+            bool rpcOK = false;
+            API::defaultClient->IsPrivileged(&rpcOK);
+            if (!rpcOK) {
+                Configs::dataManager->settingsRepo->core_running = false;
+                MW_show_log("[RPC] Core started but ProtoRPC handshake failed");
+                return;
+            }
+
+            Configs::dataManager->settingsRepo->core_running = true;
+
+            if (!rpcLoopsStarted.exchange(true)) {
+                runOnNewThread([] { Stats::trafficLooper->Loop(); });
+                runOnNewThread([] { Stats::connection_lister->Loop(); });
+                runOnNewThread([] { Stats::autoSelectorMonitor->Loop(); });
+            }
+
+            const int profileId = start_profile_when_core_is_up;
+            start_profile_when_core_is_up = -1;
+            LOG_INFO("Core ProtoRPC connection established");
+            MW_dialog_message(MwMessage::CoreStarted, {QString::number(profileId)});
         });
         connect(this, &QProcess::stateChanged, this, [&](ProcessState state) {
             if (state == NotRunning) {
@@ -98,9 +131,6 @@ namespace Configs_sys {
         started = true;
 
         auto env = QProcessEnvironment::systemEnvironment();
-        // The local socket is only a startup/restart notification channel.
-        // RPC payloads use THRONE_CORE_PORT via ProtoRPC over loopback TCP.
-        env.insert("THRONE_CORE_SOCKET", m_socketName);
         env.insert("THRONE_CORE_PORT", QString::number(m_rpcPort));
         // Turns an unrecovered Go panic into a real abort, so it dumps all
         // goroutine stacks and WER captures a minidump of the core too.
