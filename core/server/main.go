@@ -1,12 +1,13 @@
 package main
 
 import (
+	"ThroneCore/gen"
 	"ThroneCore/internal/boxmain"
 	"ThroneCore/parentcheck"
+	"flag"
 	"fmt"
 	"github.com/xtls/xray-core/core"
 	"log"
-	"net"
 	"os"
 	"runtime"
 	runtimeDebug "runtime/debug"
@@ -84,13 +85,10 @@ func writeHeapProfile() (string, error) {
 }
 
 func RunCore() {
-	portStr := os.Getenv("THRONE_CORE_PORT")
-	if portStr == "" {
-		log.Fatal("THRONE_CORE_PORT not set")
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port < 1 || port > 65535 {
-		log.Fatalf("invalid THRONE_CORE_PORT %q", portStr)
+	port := flag.Int("port", 19810, "ProtoRPC listen port")
+	flag.Parse()
+	if *port < 1 || *port > 65535 {
+		log.Fatalf("invalid -port %d", *port)
 	}
 	debug = os.Getenv("THRONE_CORE_DEBUG") == "1"
 
@@ -118,23 +116,11 @@ func RunCore() {
 
 	boxmain.DisableColor()
 
-	// ProtoRPC is the only Core<->GUI transport: one persistent connection on
-	// loopback TCP with the framing implemented in dispatch.go.
-	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
-	if err != nil {
+	address := "127.0.0.1:" + strconv.Itoa(*port)
+	fmt.Printf("Core ProtoRPC listening at %v\n", address)
+	if err := gen.ListenAndServeLibcoreService("tcp", address, new(protoRPCServer)); err != nil {
 		log.Fatalf("failed to listen for ProtoRPC: %v", err)
 	}
-	defer listener.Close()
-
-	fmt.Printf("Core ProtoRPC listening at %v\n", listener.Addr())
-	conn, err := listener.Accept()
-	if err != nil {
-		log.Fatalf("failed to accept ProtoRPC client: %v", err)
-	}
-	_ = listener.Close()
-
-	fmt.Println("Core ProtoRPC client connected")
-	runDispatch(conn)
 }
 
 func main() {

@@ -4,28 +4,15 @@
 
 #include "include/global/Configs.hpp"
 
-#include <QAtomicInt>
-#include <QByteArray>
-#include <QDataStream>
 #include <QElapsedTimer>
-#include <QLocalSocket>
-#include <QMap>
-#include <QObject>
 #include <QTcpSocket>
 #include <QThread>
 
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <exception>
-#include <memory>
-#include <mutex>
 
 namespace API {
 
     namespace {
-        constexpr int DefaultRpcTimeoutMs = 30000;
-
         // spb throws std::runtime_error on malformed/torn input. These calls run
         // on worker threads too, so turn malformed responses into failed RPCs
         // instead of terminating the process.
@@ -44,247 +31,9 @@ namespace API {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // ProtoRpcTcpChannel — protobuf messages with the legacy ProtoRPC framing
-    // over one persistent TCP connection to 127.0.0.1:<port>.
-    //
-    // Request (little-endian):
-    //   [uint32 reqId][uint16 methodLen][method][uint32 payloadLen][payload]
-    // Response (little-endian):
-    //   [uint32 reqId][uint8 status][uint32 dataLen][data]
-    // -----------------------------------------------------------------------
-    class Client::ProtoRpcTcpChannel {
-        struct PendingCall {
-            std::mutex mu;
-            std::condition_variable cv;
-            bool done = false;
-            quint8 status = 1;
-            QByteArray data;
-        };
-
-        QThread *ioThread = nullptr;
-        QObject *ioAnchor = nullptr;
-        QTcpSocket *socket = nullptr; // ioThread only
-        QByteArray readBuffer;        // ioThread only
-
-        QAtomicInt nextId{1};
-        std::mutex pendingMutex;
-        QMap<quint32, std::shared_ptr<PendingCall>> pending;
-        std::atomic<bool> connected{false};
-
-        void wakeAllWithError() {
-            connected.store(false, std::memory_order_release);
-            std::lock_guard<std::mutex> lock(pendingMutex);
-            for (auto &call : pending) {
-                std::lock_guard<std::mutex> callLock(call->mu);
-                call->done = true;
-                call->status = 1;
-                call->cv.notify_one();
-            }
-            pending.clear();
-        }
-
-        // ioThread only
-        void processBuffer() {
-            // Response header: 4 (reqId) + 1 (status) + 4 (dataLen) = 9 bytes.
-            while (readBuffer.size() >= 9) {
-                quint32 reqId = 0;
-                quint32 dataLen = 0;
-                quint8 status = 1;
-                {
-                    QDataStream stream(readBuffer);
-                    stream.setByteOrder(QDataStream::LittleEndian);
-                    stream >> reqId >> status >> dataLen;
-                }
-
-                const qint64 totalSize = qint64(9) + dataLen;
-                if (readBuffer.size() < totalSize) return;
-
-                QByteArray data = readBuffer.mid(9, static_cast<int>(dataLen));
-                readBuffer.remove(0, totalSize);
-
-                std::shared_ptr<PendingCall> call;
-                {
-                    std::lock_guard<std::mutex> lock(pendingMutex);
-                    call = pending.value(reqId, nullptr);
-                    if (call) pending.remove(reqId);
-                }
-                if (!call) continue;
-
-                std::lock_guard<std::mutex> callLock(call->mu);
-                call->status = status;
-                call->data = std::move(data);
-                call->done = true;
-                call->cv.notify_one();
-            }
-        }
-
-    public:
-        ProtoRpcTcpChannel() {
-            ioThread = new QThread;
-            ioAnchor = new QObject;
-            ioAnchor->moveToThread(ioThread);
-            ioThread->start();
-        }
-
-        ~ProtoRpcTcpChannel() {
-            wakeAllWithError();
-
-            if (ioThread && ioThread->isRunning()) {
-                QMetaObject::invokeMethod(ioAnchor, [this]() {
-                    if (socket) {
-                        socket->abort();
-                        delete socket;
-                        socket = nullptr;
-                    }
-                    readBuffer.clear();
-                }, Qt::BlockingQueuedConnection);
-                ioThread->quit();
-                ioThread->wait();
-            }
-            delete ioAnchor;
-            delete ioThread;
-        }
-
-        bool Connect(const QString &host, quint16 port, int timeoutMs) {
-            bool ok = false;
-            QMetaObject::invokeMethod(ioAnchor, [this, host, port, timeoutMs, &ok]() {
-                if (socket) {
-                    socket->abort();
-                    delete socket;
-                    socket = nullptr;
-                }
-                readBuffer.clear();
-                connected.store(false, std::memory_order_release);
-
-                socket = new QTcpSocket;
-                QElapsedTimer elapsed;
-                elapsed.start();
-
-                // The core creates the listener before sending the readiness
-                // notification, but retry briefly to make restart/startup races
-                // harmless on slower Windows systems.
-                while (elapsed.elapsed() < timeoutMs) {
-                    socket->abort();
-                    socket->connectToHost(host, port);
-                    const int remaining = timeoutMs - static_cast<int>(elapsed.elapsed());
-                    const int waitMs = qMax(1, qMin(250, remaining));
-                    if (socket->waitForConnected(waitMs)) {
-                        ok = true;
-                        break;
-                    }
-                    QThread::msleep(50);
-                }
-
-                if (!ok) {
-                    delete socket;
-                    socket = nullptr;
-                    return;
-                }
-
-                QObject::connect(socket, &QTcpSocket::readyRead, ioAnchor, [this]() {
-                    if (!socket) return;
-                    readBuffer += socket->readAll();
-                    processBuffer();
-                });
-                QObject::connect(socket, &QTcpSocket::disconnected, ioAnchor, [this]() {
-                    wakeAllWithError();
-                });
-                connected.store(true, std::memory_order_release);
-            }, Qt::BlockingQueuedConnection);
-            return ok;
-        }
-
-        int Call(const QString &methodName,
-                 const std::string &request,
-                 std::vector<uint8_t> &response,
-                 int timeoutMs = 0) {
-            response.clear();
-            if (!connected.load(std::memory_order_acquire)) return Client::CallNotConnected;
-
-            const int effectiveTimeout = timeoutMs > 0 ? timeoutMs : DefaultRpcTimeoutMs;
-            const quint32 reqId = static_cast<quint32>(nextId.fetchAndAddRelaxed(1));
-            const QByteArray method = methodName.toUtf8();
-            const QByteArray payload = QByteArray::fromStdString(request);
-
-            QByteArray frame;
-            {
-                QDataStream stream(&frame, QIODevice::WriteOnly);
-                stream.setByteOrder(QDataStream::LittleEndian);
-                stream << reqId;
-                stream << static_cast<quint16>(method.size());
-                stream.writeRawData(method.constData(), method.size());
-                stream << static_cast<quint32>(payload.size());
-                stream.writeRawData(payload.constData(), payload.size());
-            }
-
-            auto call = std::make_shared<PendingCall>();
-            {
-                std::lock_guard<std::mutex> lock(pendingMutex);
-                pending[reqId] = call;
-            }
-
-            QMetaObject::invokeMethod(ioAnchor, [this, frame]() {
-                if (!socket || socket->state() != QAbstractSocket::ConnectedState) {
-                    wakeAllWithError();
-                    return;
-                }
-                if (socket->write(frame) < 0) {
-                    wakeAllWithError();
-                    return;
-                }
-                socket->flush();
-            }, Qt::QueuedConnection);
-
-            std::unique_lock<std::mutex> lock(call->mu);
-            bool completed = call->cv.wait_for(
-                lock,
-                std::chrono::milliseconds(effectiveTimeout),
-                [&call] { return call->done; });
-            lock.unlock();
-
-            if (!completed) {
-                bool readerOwnsCall = false;
-                {
-                    std::lock_guard<std::mutex> pendingLock(pendingMutex);
-                    if (pending.remove(reqId) == 0) readerOwnsCall = true;
-                }
-                if (readerOwnsCall) {
-                    lock.lock();
-                    completed = call->cv.wait_for(
-                        lock,
-                        std::chrono::milliseconds(250),
-                        [&call] { return call->done; });
-                    lock.unlock();
-                }
-            }
-
-            std::lock_guard<std::mutex> callLock(call->mu);
-            if (!completed) return 2;
-
-            response.assign(call->data.begin(), call->data.end());
-            if (call->status != 0) {
-                if (!call->data.isEmpty())
-                    MW_show_log("[Core error] " + QString::fromUtf8(call->data));
-                return call->status;
-            }
-            return Client::CallOK;
-        }
-    };
-
-    // -----------------------------------------------------------------------
-    // Client
-    // -----------------------------------------------------------------------
-
     Client::Client() = default;
 
-    Client::~Client() {
-        std::shared_ptr<ProtoRpcTcpChannel> old;
-        {
-            std::lock_guard<std::mutex> lock(channelMutex);
-            old.swap(channel);
-        }
-    }
+    Client::~Client() = default;
 
     void Client::Reconnect(QLocalSocket *readinessSocket) {
         Q_UNUSED(readinessSocket)
@@ -298,39 +47,70 @@ namespace API {
 
         const QString host = target.left(separator);
         bool portOk = false;
-        const int portValue = target.mid(separator + 1).toInt(&portOk);
-        if (!portOk || portValue < 1 || portValue > 65535) {
+        const int port = target.mid(separator + 1).toInt(&portOk);
+        if (!portOk || port < 1 || port > 65535) {
             MW_show_log("[RPC] invalid ProtoRPC/TCP target: " + target);
             return;
         }
 
-        auto replacement = std::make_shared<ProtoRpcTcpChannel>();
-        if (!replacement->Connect(host, static_cast<quint16>(portValue), 5000)) {
-            MW_show_log("[RPC] failed to connect ProtoRPC/TCP target: " + target);
+        QTcpSocket readinessProbe;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        bool ready = false;
+        while (elapsed.elapsed() < 5000) {
+            readinessProbe.abort();
+            readinessProbe.connectToHost(host, static_cast<quint16>(port));
+            const int remaining = 5000 - static_cast<int>(elapsed.elapsed());
+            if (readinessProbe.waitForConnected(qMax(1, qMin(250, remaining)))) {
+                ready = true;
+                readinessProbe.disconnectFromHost();
+                break;
+            }
+            QThread::msleep(50);
+        }
+        if (!ready) {
+            MW_show_log("[RPC] failed to reach ProtoRPC/TCP target: " + target);
             return;
         }
 
         {
-            std::lock_guard<std::mutex> lock(channelMutex);
-            channel.swap(replacement);
+            std::lock_guard<std::mutex> lock(endpointMutex);
+            rpcHost = host.toStdString();
+            rpcPort = port;
         }
-        MW_show_log("[RPC] ProtoRPC/TCP connected: " + target);
+        MW_show_log("[RPC] ProtoRPC/TCP target ready: " + target);
     }
 
     int Client::Call(const QString &methodName,
                      const std::string &request,
                      std::vector<uint8_t> &response,
                      int timeoutMs) const {
-        std::shared_ptr<ProtoRpcTcpChannel> current;
+        (void) timeoutMs;
+
+        std::string host;
+        int port = 0;
         {
-            std::lock_guard<std::mutex> lock(channelMutex);
-            current = channel;
+            std::lock_guard<std::mutex> lock(endpointMutex);
+            host = rpcHost;
+            port = rpcPort;
         }
-        if (!current) {
+        if (host.empty() || port <= 0) {
             response.clear();
             return CallNotConnected;
         }
-        return current->Call(methodName, request, response, timeoutMs);
+
+        protorpc::Client rpc(host.c_str(), port);
+        std::string rawResponse;
+        const std::string serviceMethod = "LibcoreService." + methodName.toStdString();
+        const auto err = rpc.CallMethod(serviceMethod, &request, &rawResponse);
+        if (!err.IsNil()) {
+            response.clear();
+            MW_show_log("[Core error] " + QString::fromStdString(err.String()));
+            return 1;
+        }
+
+        response.assign(rawResponse.begin(), rawResponse.end());
+        return CallOK;
     }
 
 #define NOT_OK      \

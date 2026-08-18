@@ -77,7 +77,7 @@ build_script:
       & $modernGo version
       Assert-NativeSuccess 'modern Go version'
 
-      Write-Host 'Installing protoc 31.1 and Go generators...'
+      Write-Host 'Installing protoc 31.1 and Go/ProtoRPC generators...'
       New-Item -ItemType Directory -Force $protocRoot | Out-Null
       Download-File 'https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protoc-31.1-win64.zip' (Join-Path $tools 'protoc.zip')
       & 7z x (Join-Path $tools 'protoc.zip') "-o$protocRoot" -y | Out-Null
@@ -89,11 +89,19 @@ build_script:
       $ErrorActionPreference = 'Continue'
       & $modernGo install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
       $protocGenGoExit = $LASTEXITCODE
-      & $modernGo install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
-      $protocGenGrpcExit = $LASTEXITCODE
+      & $modernGo install github.com/chai2010/protorpc/protoc-gen-protorpc@v1.1.4
+      $protocGenProtoRpcExit = $LASTEXITCODE
       $ErrorActionPreference = 'Stop'
       if ($protocGenGoExit -ne 0) { throw "install protoc-gen-go failed with exit code $protocGenGoExit" }
-      if ($protocGenGrpcExit -ne 0) { throw "install protoc-gen-go-grpc failed with exit code $protocGenGrpcExit" }
+      if ($protocGenProtoRpcExit -ne 0) { throw "install protoc-gen-protorpc failed with exit code $protocGenProtoRpcExit" }
+
+      Write-Host 'Generating ThroneCore protobuf sources...'
+      Push-Location (Join-Path $root 'core\server\gen')
+      & (Join-Path $protocRoot 'bin\protoc.exe') -I . --go_out=. --protorpc_out=. libcore.proto
+      Assert-NativeSuccess 'generate libcore ProtoRPC sources'
+      & (Join-Path $protocRoot 'bin\protoc.exe') -I . --go_out=. xray_hysteria2.proto
+      Assert-NativeSuccess 'generate Xray Hysteria2 protobuf sources'
+      Pop-Location
 
       $coreGo = $modernGo
       $coreGoRoot = $modernRoot
@@ -149,14 +157,6 @@ build_script:
       $goModTidyExit = $LASTEXITCODE
       $ErrorActionPreference = 'Stop'
       if ($goModTidyExit -ne 0) { throw "go mod tidy failed with exit code $goModTidyExit" }
-      Pop-Location
-
-      Write-Host 'Generating ThroneCore protobuf sources...'
-      Push-Location (Join-Path $root 'core\server\gen')
-      & (Join-Path $protocRoot 'bin\protoc.exe') -I . --go_out=. --go-grpc_out=. libcore.proto
-      Assert-NativeSuccess 'generate libcore protobuf sources'
-      & (Join-Path $protocRoot 'bin\protoc.exe') -I . --go_out=. xray_hysteria2.proto
-      Assert-NativeSuccess 'generate Xray Hysteria2 protobuf sources'
       Pop-Location
 
       $dest = Join-Path $root "deployment\$env:DEST_SUFFIX"

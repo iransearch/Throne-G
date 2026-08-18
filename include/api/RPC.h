@@ -3,6 +3,7 @@
 #ifndef Q_MOC_RUN
 #include <core/server/gen/libcore.pb.h>
 #endif
+#include "3rdparty/protorpc/rpc_client.h"
 
 #include <QString>
 #include <memory>
@@ -19,8 +20,8 @@ namespace API {
 
         ~Client();
 
-        // The local socket is only the existing startup/restart notification.
-        // RPC traffic itself is ProtoRPC over loopback TCP.
+        // readinessSocket is retained for source compatibility. RPC traffic is
+        // ProtoRPC over loopback TCP; Reconnect waits briefly for its listener.
         void Reconnect(QLocalSocket *readinessSocket);
 
         // QString returns is error string
@@ -76,8 +77,6 @@ namespace API {
                                    const QString &member = {}) const;
 
     private:
-        class ProtoRpcTcpChannel;
-
         static constexpr int CallOK = 0;
         static constexpr int CallNotConnected = -1919;
 
@@ -86,8 +85,9 @@ namespace API {
                  std::vector<uint8_t> &response,
                  int timeoutMs = 0) const;
 
-        mutable std::mutex channelMutex;
-        std::shared_ptr<ProtoRpcTcpChannel> channel;
+        mutable std::mutex endpointMutex;
+        std::string rpcHost;
+        int rpcPort = 0;
     };
 
     inline Client *defaultClient;

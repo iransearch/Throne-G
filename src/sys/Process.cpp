@@ -142,7 +142,6 @@ namespace Configs_sys {
         started = true;
 
         auto env = QProcessEnvironment::systemEnvironment();
-        env.insert("THRONE_CORE_PORT", QString::number(m_rpcPort));
         // Turns an unrecovered Go panic into a real abort, so it dumps all
         // goroutine stacks and WER captures a minidump of the core too.
         env.insert("GOTRACEBACK", "crash");
@@ -154,7 +153,8 @@ namespace Configs_sys {
         // next profile start with no core restart.
         env.insert("XRAY_LOCATION_ASSET", Configs::GetBasePath());
         setProcessEnvironment(env);
-        start(program, {});
+        arguments = {"-port", QString::number(m_rpcPort)};
+        start(program, arguments);
     }
 
     void CoreProcess::Restart() {
