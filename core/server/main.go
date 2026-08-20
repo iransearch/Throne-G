@@ -92,8 +92,6 @@ func RunCore() {
 	}
 	debug = os.Getenv("THRONE_CORE_DEBUG") == "1"
 
-	parentcheck.CheckParentProcess()
-
 	// Exit when parent dies
 	go func() {
 		parent, err := os.FindProcess(parentcheck.ParentPID)
