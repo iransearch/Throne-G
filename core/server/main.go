@@ -1,13 +1,15 @@
 package main
 
 import (
-	"ThroneCore/gen"
 	"ThroneCore/internal/boxmain"
 	"ThroneCore/parentcheck"
 	"flag"
 	"fmt"
+	"github.com/chai2010/protorpc"
 	"github.com/xtls/xray-core/core"
 	"log"
+	"net"
+	"net/rpc"
 	"os"
 	"runtime"
 	runtimeDebug "runtime/debug"
@@ -28,6 +30,8 @@ const (
 	memoryPanicThreshold  = 1536 * 1024 * 1024     // 1.5GB
 	memoryCheckInterval   = 2 * time.Second
 	memoryForcedGCBackoff = 30 * time.Second
+	probeTimeout          = 10 * time.Second
+	probeDisconnectWait   = 2 * time.Second
 )
 
 // liveHeap avoids HeapAlloc, which also counts unswept garbage and sawtooths
@@ -84,10 +88,75 @@ func writeHeapProfile() (string, error) {
 	return f.Name(), f.Sync()
 }
 
+func registerProtoRPCServer(service *protoRPCServer) (*rpc.Server, error) {
+	server := rpc.NewServer()
+	if err := server.RegisterName("LibcoreService", service); err != nil {
+		return nil, err
+	}
+	return server, nil
+}
+
+func serveProtoRPC(listener net.Listener, service *protoRPCServer) error {
+	server, err := registerProtoRPCServer(service)
+	if err != nil {
+		return err
+	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		go server.ServeCodec(protorpc.NewServerCodec(conn))
+	}
+}
+
+func serveProbe(listener net.Listener, service *protoRPCServer) error {
+	server, err := registerProtoRPCServer(service)
+	if err != nil {
+		return err
+	}
+
+	// The caller parses this exact marker and then performs one real ProtoRPC
+	// IsPrivileged call. Port 0 lets Windows allocate an isolated ephemeral port,
+	// so the probe can never leave the production port in TIME_WAIT.
+	fmt.Printf("PROBE_READY %v\n", listener.Addr())
+
+	conn, err := listener.Accept()
+	if err != nil {
+		return err
+	}
+	clientDone := make(chan struct{})
+	go func() {
+		server.ServeCodec(protorpc.NewServerCodec(conn))
+		close(clientDone)
+	}()
+
+	select {
+	case <-service.probeSuccess:
+		// Let the client read the response and close its connection. That makes the
+		// probe process exit cleanly without a kill and without a zombie listener.
+		select {
+		case <-clientDone:
+			return nil
+		case <-time.After(probeDisconnectWait):
+			_ = conn.Close()
+			<-clientDone
+			return nil
+		}
+	case <-clientDone:
+		return fmt.Errorf("probe client disconnected before health RPC completed")
+	case <-time.After(probeTimeout):
+		_ = conn.Close()
+		<-clientDone
+		return fmt.Errorf("probe timed out after %s", probeTimeout)
+	}
+}
+
 func RunCore() {
 	port := flag.Int("port", 19810, "ProtoRPC listen port")
+	probeMode := flag.Bool("probe-mode", false, "run a one-shot ProtoRPC health probe")
 	flag.Parse()
-	if *port < 1 || *port > 65535 {
+	if *port < 0 || *port > 65535 || (!*probeMode && *port == 0) {
 		log.Fatalf("invalid -port %d", *port)
 	}
 	debug = os.Getenv("THRONE_CORE_DEBUG") == "1"
@@ -115,9 +184,24 @@ func RunCore() {
 	boxmain.DisableColor()
 
 	address := "127.0.0.1:" + strconv.Itoa(*port)
-	fmt.Printf("Core ProtoRPC listening at %v\n", address)
-	if err := gen.ListenAndServeLibcoreService("tcp", address, new(protoRPCServer)); err != nil {
-		log.Fatalf("failed to listen for ProtoRPC: %v", err)
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("failed to listen for ProtoRPC on %s: %v", address, err)
+	}
+	defer listener.Close()
+
+	service := &protoRPCServer{}
+	if *probeMode {
+		service.probeSuccess = make(chan struct{})
+		if err := serveProbe(listener, service); err != nil {
+			log.Fatalf("ProtoRPC probe failed: %v", err)
+		}
+		return
+	}
+
+	fmt.Printf("Core ProtoRPC listening at %v\n", listener.Addr())
+	if err := serveProtoRPC(listener, service); err != nil {
+		log.Fatalf("failed to serve ProtoRPC: %v", err)
 	}
 }
 
