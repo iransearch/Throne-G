@@ -1,6 +1,7 @@
 package main
 
 import (
+	"ThroneCore/gen"
 	"ThroneCore/internal/boxmain"
 	"ThroneCore/parentcheck"
 	"flag"
@@ -96,20 +97,6 @@ func registerProtoRPCServer(service *protoRPCServer) (*rpc.Server, error) {
 	return server, nil
 }
 
-func serveProtoRPC(listener net.Listener, service *protoRPCServer) error {
-	server, err := registerProtoRPCServer(service)
-	if err != nil {
-		return err
-	}
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err
-		}
-		go server.ServeCodec(protorpc.NewServerCodec(conn))
-	}
-}
-
 func serveProbe(listener net.Listener, service *protoRPCServer) error {
 	server, err := registerProtoRPCServer(service)
 	if err != nil {
@@ -184,24 +171,25 @@ func RunCore() {
 	boxmain.DisableColor()
 
 	address := "127.0.0.1:" + strconv.Itoa(*port)
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		log.Fatalf("failed to listen for ProtoRPC on %s: %v", address, err)
-	}
-	defer listener.Close()
-
-	service := &protoRPCServer{}
 	if *probeMode {
-		service.probeSuccess = make(chan struct{})
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			log.Fatalf("failed to listen for ProtoRPC probe on %s: %v", address, err)
+		}
+		defer listener.Close()
+
+		service := &protoRPCServer{probeSuccess: make(chan struct{})}
 		if err := serveProbe(listener, service); err != nil {
 			log.Fatalf("ProtoRPC probe failed: %v", err)
 		}
 		return
 	}
 
-	fmt.Printf("Core ProtoRPC listening at %v\n", listener.Addr())
-	if err := serveProtoRPC(listener, service); err != nil {
-		log.Fatalf("failed to serve ProtoRPC: %v", err)
+	// Keep the production path identical to the proven 1.0.12-style generated
+	// ProtoRPC server. Probe mode is isolated and cannot change normal serving.
+	fmt.Printf("Core ProtoRPC listening at %v\n", address)
+	if err := gen.ListenAndServeLibcoreService("tcp", address, new(protoRPCServer)); err != nil {
+		log.Fatalf("failed to listen for ProtoRPC: %v", err)
 	}
 }
 
