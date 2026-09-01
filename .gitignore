@@ -75,11 +75,16 @@ Thumbs.db
 CMakeLists.txt.user*
 /cmake-build-*
 /build-*
+!/build-core.cmd
+!/build-thronebuilder.cmd
 .vscode
 .idea
 
 # Deploy
 /deployment
+/CoreBuilds
+/SGuardBuilds
+/.core-builder
 /neko*.sh
 /qtsdk
 
