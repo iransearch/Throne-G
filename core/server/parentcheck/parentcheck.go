@@ -16,6 +16,16 @@ func CheckParentProcess() {
 		log.Fatalf("parent check: cannot read parent executable: %v", err)
 	}
 	parentPath = resolveFinalPath(parentPath)
+	parentBase := filepath.Base(parentPath)
+
+	if runtime.GOOS == "windows" {
+		validParent := strings.EqualFold(parentBase, "Throne.exe") ||
+			strings.EqualFold(parentBase, "IRSpeedyVPN.exe")
+		if !validParent {
+			log.Fatalf("parent check failed: unexpected parent %q", parentPath)
+		}
+		return
+	}
 
 	selfPath, err := os.Executable()
 	if err != nil {
@@ -25,15 +35,6 @@ func CheckParentProcess() {
 
 	selfDir := filepath.Dir(selfPath)
 	parentDir := filepath.Dir(parentPath)
-	parentBase := filepath.Base(parentPath)
-
-	if runtime.GOOS == "windows" {
-		if !strings.EqualFold(parentDir, selfDir) || !strings.EqualFold(parentBase, "Throne.exe") {
-			log.Fatalf("parent check failed: unexpected parent %q, selfPath is %q", parentPath, selfPath)
-		}
-		return
-	}
-
 	if parentDir != selfDir || parentBase != "Throne" {
 		log.Fatalf("parent check failed: unexpected parent %q, selfPath is %q", parentPath, selfPath)
 	}

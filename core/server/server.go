@@ -113,9 +113,7 @@ func liveXrayInstances() []*core.Instance {
 	return instances
 }
 
-type server struct {
-	gen.UnimplementedLibcoreServiceServer
-}
+type server int
 
 func To[T any](v T) *T {
 	return &v

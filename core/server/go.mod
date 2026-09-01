@@ -4,18 +4,18 @@ go 1.26
 
 require (
 	github.com/Mahdi-zarei/speedtest-go v1.7.13-0.20260107171856-79c565dfd83a
+	github.com/chai2010/protorpc v0.0.0-00010101000000-000000000000
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gofrs/uuid/v5 v5.5.1
+	github.com/golang/protobuf v1.5.4
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/sagernet/sing v0.9.0-beta.4
 	github.com/sagernet/sing-box v1.14.0-rc.5
 	github.com/sagernet/sing-tun v0.9.0-beta.4
 	github.com/spf13/cobra v1.10.2
-	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55
 	github.com/xtls/xray-core v1.260327.1-0.20260728075948-5ca6f4b7d4dc
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -24,6 +24,8 @@ replace github.com/xtls/xray-core => github.com/throneproj/xray-core v1.251015.1
 replace github.com/sagernet/sing-box => github.com/throneproj/sing-box v1.11.16-0.20260830141411-990fb42efe38
 
 replace github.com/sagernet/wireguard-go => github.com/throneproj/wireguard-go v0.0.0-20260826184406-6afb6c3abbbf
+
+replace github.com/chai2010/protorpc => ../protorpc
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -171,6 +173,7 @@ require (
 	github.com/smallstep/pkcs7 v0.1.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
+	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd // indirect
 	github.com/tailscale/netlink v1.1.1-0.20240822203006-4d49adab4de7 // indirect
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
@@ -207,6 +210,7 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb // indirect
 	golang.zx2c4.com/wireguard/windows v1.0.1 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect

@@ -3,9 +3,15 @@
 #ifndef Q_MOC_RUN
 #include <core/server/gen/libcore.pb.h>
 #endif
+#include "3rdparty/protorpc/rpc_client.h"
+
 #include <QMap>
 #include <QString>
 #include <QStringList>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 class QLocalSocket;
 
@@ -16,7 +22,9 @@ namespace API {
 
         ~Client();
 
-        void Reconnect(QLocalSocket *socket);
+        // readinessSocket is retained for source compatibility. RPC traffic is
+        // ProtoRPC over loopback TCP; Reconnect waits briefly for its listener.
+        void Reconnect(QLocalSocket *readinessSocket);
 
         // QString returns is error string
 
@@ -26,7 +34,9 @@ namespace API {
 
         libcore::QueryStatsResp QueryStats();
 
-        // coreError (optional): on RPC failure, receives the core's error message.
+        // coreError (optional): on RPC failure, receives the core's error message
+        // so callers can react to it (e.g. missing Xray geo assets) rather than
+        // silently dropping the failed test.
         libcore::TestResp Test(bool *rpcOK, const libcore::TestReq &request, QString *coreError = nullptr);
 
         void StopTests(bool *rpcOK);
@@ -44,6 +54,8 @@ namespace API {
         // Ids already gone are a no-op; closedCount (optional) receives how many were actually live.
         QString CloseConnections(bool *rpcOK, const QStringList &ids, int *closedCount = nullptr) const;
 
+        // isXray selects the validating core: false (default) validates a
+        // sing-box config, true validates an Xray-format config.
         QString CheckConfig(bool *rpcOK, const QString& config, bool isXray = false) const;
 
         bool IsPrivileged(bool *rpcOK) const;
@@ -58,13 +70,16 @@ namespace API {
 
         QString InstallDashboard(bool *rpcOK, const QString &archivePath, const QString &targetDir) const;
 
-        // Empty name = the OS has no default route.
+        // Empty name = the OS has no default route. A local, censorship-proof
+        // way to tell "my network died" from "the servers died".
         [[nodiscard]] libcore::GetDefaultInterfaceResponse GetDefaultInterface(bool *rpcOK) const;
 
-        // Clears no core-side counters, so polling it alongside QueryStats is safe.
+        // Idempotent snapshot of every running auto-selector group: it clears no
+        // core-side counters, so polling it alongside QueryStats is safe.
         [[nodiscard]] libcore::QueryAutoSelectorsResponse QueryAutoSelectors(bool *rpcOK) const;
 
-        // action: "recheck" (sweep now) | "select" (pin to member); an empty tag targets every group.
+        // action: "recheck" forces a full sweep now, "select" pins the group to
+        // member. An empty tag targets every auto-selector group.
         QString AutoSelectorAction(bool *rpcOK, const QString &tag, const QString &action,
                                    const QString &member = {}) const;
 
@@ -80,8 +95,17 @@ namespace API {
         QString CancelVPNChallenge(bool *rpcOK, const QString &endpointTag, const QString &challengeId) const;
 
     private:
-        class LocalSocketChannel;
-        std::unique_ptr<LocalSocketChannel> channel;
+        static constexpr int CallOK = 0;
+        static constexpr int CallNotConnected = -1919;
+
+        int Call(const QString &methodName,
+                 const std::string &request,
+                 std::vector<uint8_t> &response,
+                 int timeoutMs = 0) const;
+
+        mutable std::mutex endpointMutex;
+        std::string rpcHost;
+        int rpcPort = 0;
     };
 
     inline Client *defaultClient;

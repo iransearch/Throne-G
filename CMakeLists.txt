@@ -104,6 +104,10 @@ set(PROJECT_SOURCES
         3rdparty/qrcodegen.cpp
         3rdparty/QtExtKeySequenceEdit.cpp
         3rdparty/QrDecoder.cpp
+        3rdparty/protorpc/rpc_client.cc
+        3rdparty/protorpc/rpc_conn.cc
+        3rdparty/protorpc/rpc_wire.cc
+        3rdparty/protorpc/wire.pb/wire.pb.cc
 
         3rdparty/qv2ray/v2/ui/LogHighlighter.cpp
         3rdparty/qv2ray/v2/ui/QvAutoCompleteTextEdit.cpp

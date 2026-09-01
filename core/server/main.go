@@ -1,18 +1,22 @@
 package main
 
 import (
+	"ThroneCore/gen"
 	"ThroneCore/internal/boxmain"
-	"ThroneCore/ipc"
 	"ThroneCore/parentcheck"
+	"flag"
 	"fmt"
+	"github.com/chai2010/protorpc"
 	"github.com/xtls/xray-core/core"
 	"log"
 	"net"
+	"net/rpc"
 	"os"
 	"runtime"
 	runtimeDebug "runtime/debug"
 	"runtime/metrics"
 	"runtime/pprof"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -26,6 +30,8 @@ const (
 	memoryPanicThreshold  = 1536 * 1024 * 1024
 	memoryCheckInterval   = 2 * time.Second
 	memoryForcedGCBackoff = 30 * time.Second
+	probeTimeout          = 10 * time.Second
+	probeDisconnectWait   = 2 * time.Second
 )
 
 // Not HeapAlloc: it counts unswept garbage and sawtooths up to the GC target, so a bare threshold on it fires on a healthy heap.
@@ -76,15 +82,65 @@ func writeHeapProfile() (string, error) {
 	return f.Name(), f.Sync()
 }
 
+func registerProtoRPCServer(service *protoRPCServer) (*rpc.Server, error) {
+	server := rpc.NewServer()
+	if err := server.RegisterName("LibcoreService", service); err != nil {
+		return nil, err
+	}
+	return server, nil
+}
+
+func serveProbe(listener net.Listener, service *protoRPCServer) error {
+	server, err := registerProtoRPCServer(service)
+	if err != nil {
+		return err
+	}
+
+	// The caller parses this exact marker and then performs one real ProtoRPC
+	// IsPrivileged call. Port 0 lets Windows allocate an isolated ephemeral port,
+	// so the probe can never leave the production port in TIME_WAIT.
+	fmt.Printf("PROBE_READY %v\n", listener.Addr())
+
+	conn, err := listener.Accept()
+	if err != nil {
+		return err
+	}
+	clientDone := make(chan struct{})
+	go func() {
+		server.ServeCodec(protorpc.NewServerCodec(conn))
+		close(clientDone)
+	}()
+
+	select {
+	case <-service.probeSuccess:
+		// Let the client read the response and close its connection. That makes the
+		// probe process exit cleanly without a kill and without a zombie listener.
+		select {
+		case <-clientDone:
+			return nil
+		case <-time.After(probeDisconnectWait):
+			_ = conn.Close()
+			<-clientDone
+			return nil
+		}
+	case <-clientDone:
+		return fmt.Errorf("probe client disconnected before health RPC completed")
+	case <-time.After(probeTimeout):
+		_ = conn.Close()
+		<-clientDone
+		return fmt.Errorf("probe timed out after %s", probeTimeout)
+	}
+}
+
 func RunCore() {
-	socketName := os.Getenv("THRONE_CORE_SOCKET")
-	if socketName == "" {
-		log.Fatal("THRONE_CORE_SOCKET not set")
+	port := flag.Int("port", 19810, "ProtoRPC listen port")
+	probeMode := flag.Bool("probe-mode", false, "run a one-shot ProtoRPC health probe")
+	flag.Parse()
+	if *port < 0 || *port > 65535 || (!*probeMode && *port == 0) {
+		log.Fatalf("invalid -port %d", *port)
 	}
 	debug = os.Getenv("THRONE_CORE_DEBUG") == "1"
-
-	parentcheck.CheckParentProcess()
-
+	// Exit when parent dies
 	go func() {
 		parent, err := os.FindProcess(parentcheck.ParentPID)
 		if err != nil {
@@ -105,23 +161,27 @@ func RunCore() {
 	}()
 
 	boxmain.DisableColor()
-
-	var conn net.Conn
-	var err error
-	for i := 0; i < 10; i++ {
-		conn, err = ipc.ConnectIPC(socketName, parentcheck.ParentPID)
-		if err == nil {
-			break
+	address := "127.0.0.1:" + strconv.Itoa(*port)
+	if *probeMode {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			log.Fatalf("failed to listen for ProtoRPC probe on %s: %v", address, err)
 		}
-		log.Printf("IPC connect attempt %d/10 failed: %v", i+1, err)
-		time.Sleep(500 * time.Millisecond)
-	}
-	if err != nil {
-		log.Fatalf("failed to connect to GUI socket after 10 attempts: %v", err)
+		defer listener.Close()
+
+		service := &protoRPCServer{probeSuccess: make(chan struct{})}
+		if err := serveProbe(listener, service); err != nil {
+			log.Fatalf("ProtoRPC probe failed: %v", err)
+		}
+		return
 	}
 
-	fmt.Println("Core Has Successfully Connected to Throne!")
-	runDispatch(conn)
+	// Keep the production path identical to the proven 1.0.12-style generated
+	// ProtoRPC server. Probe mode is isolated and cannot change normal serving.
+	fmt.Printf("Core ProtoRPC listening at %v\n", address)
+	if err := gen.ListenAndServeLibcoreService("tcp", address, new(protoRPCServer)); err != nil {
+		log.Fatalf("failed to listen for ProtoRPC: %v", err)
+	}
 }
 
 func main() {

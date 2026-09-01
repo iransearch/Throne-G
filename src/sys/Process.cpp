@@ -1,16 +1,24 @@
 #include "include/sys/Process.hpp"
 #include "include/global/Configs.hpp"
 #include "include/global/Logger.hpp"
+#include "include/api/RPC.h"
+#include "include/stats/traffic/TrafficLooper.hpp"
+#include "include/stats/autoselector/AutoSelectorMonitor.hpp"
 
 #include <QTimer>
 #include <QDir>
 #include <QApplication>
+#include <QLocalServer>
 
-
+#include <atomic>
 
 #include "include/ui/mainwindow.h"
 
 namespace Configs_sys {
+    namespace {
+        std::atomic_bool rpcLoopsStarted{false};
+    }
+
     CoreProcess::~CoreProcess() {
     }
 
@@ -20,8 +28,26 @@ namespace Configs_sys {
     }
 
     CoreProcess::CoreProcess(const QString &core_path, const QString &socketName, bool debugMode)
-        : m_socketName(socketName), m_debugMode(debugMode) {
+        : m_debugMode(debugMode) {
+        Q_UNUSED(socketName);
         program = core_path;
+
+        // MainWindow still constructs its former Core QLocalServer before this
+        // object. Close that legacy listener immediately: Core<->GUI transport is
+        // ProtoRPC/TCP only. The application's separate single-instance server is
+        // parented by qApp, not MainWindow, so it is unaffected.
+        runOnUiThread([] {
+            for (auto *server : GetMainWindow()->findChildren<QLocalServer*>()) {
+                if (server->serverName().startsWith("throneIPC-")) server->close();
+            }
+        }, true);
+
+        // Reserve the loopback TCP endpoint used by ProtoRPC. core_socket_name is
+        // runtime-only and currently carries the endpoint string for the RPC client.
+        m_rpcPort = MkPort("127.0.0.1");
+        if (m_rpcPort <= 0) m_rpcPort = 19810;
+        Configs::dataManager->settingsRepo->core_socket_name =
+            "127.0.0.1:" + QString::number(m_rpcPort);
 
         connect(this, &QProcess::readyReadStandardOutput, this, [&]() {
             auto log = readAllStandardOutput();
@@ -51,6 +77,32 @@ namespace Configs_sys {
                                .arg(exitCode)
                                .arg(exitStatus == CrashExit ? "crash" : "normal")
                                .arg(Configs::dataManager->settingsRepo->prepare_exit ? " (during shutdown)" : ""));
+        });
+        connect(this, &QProcess::started, this, [this]() {
+            // No NamedPipe readiness handshake: connect the long-lived GUI client
+            // straight to the ProtoRPC listener. Reconnect() retries startup races.
+            API::defaultClient->Reconnect(nullptr);
+
+            bool rpcOK = false;
+            API::defaultClient->IsPrivileged(&rpcOK);
+            if (!rpcOK) {
+                Configs::dataManager->settingsRepo->core_running = false;
+                MW_show_log("[RPC] Core started but ProtoRPC handshake failed");
+                return;
+            }
+
+            Configs::dataManager->settingsRepo->core_running = true;
+
+            if (!rpcLoopsStarted.exchange(true)) {
+                runOnNewThread([] { Stats::trafficLooper->Loop(); });
+                runOnNewThread([] { Stats::connection_lister->Loop(); });
+                runOnNewThread([] { Stats::autoSelectorMonitor->Loop(); });
+            }
+
+            const int profileId = start_profile_when_core_is_up;
+            start_profile_when_core_is_up = -1;
+            LOG_INFO("Core ProtoRPC connection established");
+            MW_dialog_message(MwMessage::CoreStarted, {QString::number(profileId)});
         });
         connect(this, &QProcess::stateChanged, this, [&](ProcessState state) {
             if (state == NotRunning) {
@@ -88,14 +140,15 @@ namespace Configs_sys {
         started = true;
 
         auto env = QProcessEnvironment::systemEnvironment();
-        env.insert("THRONE_CORE_SOCKET", m_socketName);
-        // Turns an unrecovered Go panic into a real abort, so all goroutine stacks are dumped and WER captures the core too.
+        // Turns an unrecovered Go panic into a real abort, so it dumps all
+        // goroutine stacks and WER captures a minidump of the core too.
         env.insert("GOTRACEBACK", "crash");
         if (m_debugMode) env.insert("THRONE_CORE_DEBUG", "1");
         // Points Xray's asset loader at our writable config dir, so a geoip.dat/geosite.dat downloaded later is found with no core restart.
         env.insert("XRAY_LOCATION_ASSET", Configs::GetBasePath());
         setProcessEnvironment(env);
-        start(program, {});
+        arguments = {"-port", QString::number(m_rpcPort)};
+        start(program, arguments);
     }
 
     void CoreProcess::Restart() {
