@@ -8,6 +8,8 @@ import (
 )
 
 func (s *server) GetDefaultInterface(ctx context.Context, in *gen.EmptyReq) (*gen.GetDefaultInterfaceResponse, error) {
+	_ = boxdns.Start()
+
 	ifc := boxdns.DefaultInterface()
 	if ifc == nil {
 		return nil, errors.New("no default interface")

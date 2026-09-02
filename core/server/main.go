@@ -178,8 +178,9 @@ func RunCore() {
 
 	// Keep the production path identical to the proven 1.0.12-style generated
 	// ProtoRPC server. Probe mode is isolated and cannot change normal serving.
-	fmt.Printf("Core ProtoRPC listening at %v\n", address)
-	if err := gen.ListenAndServeLibcoreService("tcp", address, new(protoRPCServer)); err != nil {
+	fmt.Printf("Core ProtoRPC starting at %v\n", address)
+	service := &protoRPCServer{readyAddress: address}
+	if err := gen.ListenAndServeLibcoreService("tcp", address, service); err != nil {
 		log.Fatalf("failed to listen for ProtoRPC: %v", err)
 	}
 }

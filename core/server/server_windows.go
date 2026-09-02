@@ -7,6 +7,8 @@ import (
 )
 
 func (s *server) SetSystemDNS(ctx context.Context, in *gen.SetSystemDNSRequest) (*gen.EmptyResp, error) {
+	_ = boxdns.Start()
+
 	err := boxdns.DnsManagerInstance.SetSystemDNS(nil, *in.Clear)
 	if err != nil {
 		return nil, err

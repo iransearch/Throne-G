@@ -377,6 +377,11 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
 
+	// Preserve the old ordering for network-dependent work without delaying the
+	// ProtoRPC listener itself. Startup failures are still handled downstream as
+	// they were when the monitors ran in init.
+	_ = boxdns.Start()
+
 	var err error
 
 	defer func() {
@@ -588,6 +593,8 @@ func (s *server) CheckConfig(ctx context.Context, in *gen.LoadConfigReq) (out *g
 }
 
 func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, error) {
+	_ = boxdns.Start()
+
 	env, err := prepareTestEnv(in.GetTestCurrent(), in.GetNeedXray(), in.GetXrayConfig(),
 		in.XrayFullConfigs, in.GetConfig(), in.OutboundTags, in.GetUseDefaultOutbound(),
 		in.GetXrayOutboundDnsStrategy())
@@ -668,6 +675,8 @@ func (s *server) QueryURLTest(ctx context.Context, in *gen.EmptyReq) (out *gen.Q
 }
 
 func (s *server) IPTest(ctx context.Context, in *gen.IPTestRequest) (*gen.IPTestResp, error) {
+	_ = boxdns.Start()
+
 	// Always builds its own box: there is no test-current variant of an IP test.
 	env, err := prepareTestEnv(false, in.GetNeedXray(), in.GetXrayConfig(),
 		in.XrayFullConfigs, in.GetConfig(), in.OutboundTags, in.GetUseDefaultOutbound(),
@@ -841,6 +850,8 @@ func (s *server) IsPrivileged(ctx context.Context, _ *gen.EmptyReq) (*gen.IsPriv
 }
 
 func (s *server) SpeedTest(ctx context.Context, in *gen.SpeedTestRequest) (*gen.SpeedTestResponse, error) {
+	_ = boxdns.Start()
+
 	if !*in.TestDownload && !*in.TestUpload && !*in.SimpleDownload && !*in.OnlyCountry {
 		return nil, errors.New("cannot run empty test")
 	}

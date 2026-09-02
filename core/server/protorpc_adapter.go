@@ -2,7 +2,9 @@ package main
 
 import (
 	"ThroneCore/gen"
+	"ThroneCore/internal/boxdns"
 	"context"
+	"fmt"
 	"sync"
 
 	"google.golang.org/protobuf/proto"
@@ -13,6 +15,8 @@ import (
 type protoRPCServer struct {
 	probeSuccess chan struct{}
 	probeOnce    sync.Once
+	readyAddress string
+	readyOnce    sync.Once
 }
 
 var globalServer = new(server)
@@ -78,6 +82,15 @@ func (s *protoRPCServer) IsPrivileged(in *gen.EmptyReq, out *gen.IsPrivilegedRes
 	err := adaptProtoRPC(out, func() (*gen.IsPrivilegedResponse, error) {
 		return globalServer.IsPrivileged(context.Background(), in)
 	})
+	if err == nil && s.readyAddress != "" {
+		// The generated server has already accepted this real RPC. Starting the
+		// OS monitors here keeps their slow initialization off the listen path;
+		// dependent RPCs join the same attempt through boxdns.Start.
+		s.readyOnce.Do(func() {
+			fmt.Printf("Core ProtoRPC ready at %v\n", s.readyAddress)
+		})
+		boxdns.StartAsync()
+	}
 	if err == nil && s.probeSuccess != nil {
 		s.probeOnce.Do(func() { close(s.probeSuccess) })
 	}
