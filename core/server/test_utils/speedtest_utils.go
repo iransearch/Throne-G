@@ -21,7 +21,6 @@ import (
 var SpTQuerier SpeedTestResultQuerier
 var CountryResults resultBuffer[SpeedTestResult]
 
-// How often a running speed test republishes its partial numbers for the GUI.
 const speedtestSampleInterval = 50 * time.Millisecond
 
 type SpeedTestResult struct {
@@ -33,7 +32,7 @@ type SpeedTestResult struct {
 	ServerCountry string
 	Error         error
 	Cancelled     bool
-	DlBytes       int64 // total bytes moved by the test, credited to per-config stats
+	DlBytes       int64 // credited to per-config traffic stats
 	UlBytes       int64
 }
 
@@ -61,8 +60,7 @@ func (s *SpeedTestResultQuerier) setIsRunning(isRunning bool) {
 	s.isRunning = isRunning
 }
 
-// Tallies bytes without keeping them: the sampling loop reads the total mid-copy,
-// which a bytes.Buffer cannot serve safely.
+// The sampling loop reads the total mid-copy, which a bytes.Buffer cannot serve safely.
 type countingWriter struct{ n atomic.Int64 }
 
 func (w *countingWriter) Write(p []byte) (int, error) {
@@ -193,7 +191,6 @@ func simpleDownloadTest(ctx context.Context, dialer func(ctx context.Context, ne
 	SpTQuerier.setIsRunning(true)
 	defer SpTQuerier.setIsRunning(false)
 
-	// Before the first byte there is no start time, so the rate stays untouched.
 	sample := func() {
 		n := counted.n.Load()
 		if start := startNs.Load(); start != 0 {
@@ -230,7 +227,7 @@ func speedTestWithDialer(ctx context.Context, dialer func(ctx context.Context, n
 	res.ServerCountry = srv.Country
 
 	done := make(chan struct{})
-	// Only read after <-done; assigning the enclosing `err` in there raced.
+	// Only read after <-done, which orders it against the goroutine's write.
 	var testErr error
 
 	SpTQuerier.setIsRunning(true)

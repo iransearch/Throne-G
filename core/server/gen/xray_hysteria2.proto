@@ -16,4 +16,6 @@ message XrayHysteria2Config {
   optional string obfs_type = 8;
   optional string obfs_password = 9;
   optional string tls_json = 10;
+  optional int32 min_packet_size = 11;
+  optional int32 max_packet_size = 12;
 }

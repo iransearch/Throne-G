@@ -91,19 +91,7 @@ func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.D
 		}
 	}
 
-	var salamanderPassword, geckoPassword string
-	if h.config.GetObfsPassword() != "" {
-		switch strings.ToLower(h.config.GetObfsType()) {
-		case "", hy2.ObfsTypeSalamander:
-			salamanderPassword = h.config.GetObfsPassword()
-		case hy2.ObfsTypeGecko:
-			geckoPassword = h.config.GetObfsPassword()
-		default:
-			return nil, fmt.Errorf("hysteria2 xray: unsupported obfs type %q", h.config.GetObfsType())
-		}
-	}
-
-	client, err := hy2.NewClient(hy2.ClientOptions{
+	clientOptions := hy2.ClientOptions{
 		Context:            lifetimeCtx,
 		Dialer:             &xrayHysteriaServerDialer{dialer: dialer},
 		Logger:             logger,
@@ -112,17 +100,37 @@ func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.D
 		HopInterval:        hopInterval,
 		SendBPS:            uint64(h.config.GetUpMbps()) * hysteria.MbpsToBps,
 		ReceiveBPS:         uint64(h.config.GetDownMbps()) * hysteria.MbpsToBps,
-		SalamanderPassword: salamanderPassword,
-		GeckoPassword:      geckoPassword,
 		Password:           h.config.GetPassword(),
 		TLSConfig:          tlsConfig,
 		UDPDisabled:        false,
-	})
+	}
+	if err := applyXrayHysteria2Obfs(&clientOptions, h.config); err != nil {
+		return nil, err
+	}
+
+	client, err := hy2.NewClient(clientOptions)
 	if err != nil {
 		return nil, fmt.Errorf("hysteria2 xray: create client: %w", err)
 	}
 	h.client = client
 	return client, nil
+}
+
+func applyXrayHysteria2Obfs(options *hy2.ClientOptions, config *gen.XrayHysteria2Config) error {
+	if config.GetObfsPassword() == "" {
+		return nil
+	}
+	switch strings.ToLower(config.GetObfsType()) {
+	case "", hy2.ObfsTypeSalamander:
+		options.SalamanderPassword = config.GetObfsPassword()
+	case hy2.ObfsTypeGecko:
+		options.GeckoPassword = config.GetObfsPassword()
+		options.GeckoMinPacketSize = int(config.GetMinPacketSize())
+		options.GeckoMaxPacketSize = int(config.GetMaxPacketSize())
+	default:
+		return fmt.Errorf("hysteria2 xray: unsupported obfs type %q", config.GetObfsType())
+	}
+	return nil
 }
 
 func (h *xrayHysteria2Outbound) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {

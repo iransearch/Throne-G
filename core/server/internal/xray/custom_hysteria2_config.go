@@ -28,9 +28,18 @@ func isCustomXrayHysteria2Protocol(protocol string) bool {
 }
 
 type xrayHysteria2JSONObfs struct {
-	Type     string `json:"type"`
-	Password string `json:"password"`
+	Type          string `json:"type"`
+	Password      string `json:"password"`
+	MinPacketSize *int32 `json:"min_packet_size"`
+	MaxPacketSize *int32 `json:"max_packet_size"`
 }
+
+const (
+	// Keep these values in sync with sing-quic/hysteria2 Gecko validation.
+	xrayHysteria2GeckoDefaultMinPacketSize int32 = 512
+	xrayHysteria2GeckoDefaultMaxPacketSize int32 = 1200
+	xrayHysteria2GeckoMaxPacketSize        int32 = 2048
+)
 
 type xrayHysteria2JSONSettings struct {
 	Server      string                 `json:"server"`
@@ -246,9 +255,12 @@ func (s xrayHysteria2JSONSettings) toProto() (*gen.XrayHysteria2Config, error) {
 	}
 
 	obfsType, obfsPassword := "", ""
+	var minPacketSize, maxPacketSize *int32
 	if s.Obfs != nil {
 		obfsType = strings.ToLower(strings.TrimSpace(s.Obfs.Type))
 		obfsPassword = s.Obfs.Password
+		minPacketSize = s.Obfs.MinPacketSize
+		maxPacketSize = s.Obfs.MaxPacketSize
 		if obfsType == "" {
 			obfsType = "salamander"
 		}
@@ -276,16 +288,18 @@ func (s xrayHysteria2JSONSettings) toProto() (*gen.XrayHysteria2Config, error) {
 	}
 
 	config := &gen.XrayHysteria2Config{
-		Server:       &s.Server,
-		ServerPort:   &s.ServerPort,
-		ServerPorts:  append([]string(nil), s.ServerPorts...),
-		HopInterval:  stringPtr(s.HopInterval),
-		UpMbps:       int32Ptr(s.UpMbps),
-		DownMbps:     int32Ptr(s.DownMbps),
-		Password:     stringPtr(s.Password),
-		ObfsType:     stringPtr(obfsType),
-		ObfsPassword: stringPtr(obfsPassword),
-		TlsJson:      stringPtr(string(tlsJSON)),
+		Server:        &s.Server,
+		ServerPort:    &s.ServerPort,
+		ServerPorts:   append([]string(nil), s.ServerPorts...),
+		HopInterval:   stringPtr(s.HopInterval),
+		UpMbps:        int32Ptr(s.UpMbps),
+		DownMbps:      int32Ptr(s.DownMbps),
+		Password:      stringPtr(s.Password),
+		ObfsType:      stringPtr(obfsType),
+		ObfsPassword:  stringPtr(obfsPassword),
+		TlsJson:       stringPtr(string(tlsJSON)),
+		MinPacketSize: minPacketSize,
+		MaxPacketSize: maxPacketSize,
 	}
 	return config, validateXrayHysteria2Proto(config)
 }
@@ -315,8 +329,41 @@ func validateXrayHysteria2Proto(config *gen.XrayHysteria2Config) error {
 			return fmt.Errorf("unsupported obfs type %q", config.GetObfsType())
 		}
 	}
+	if err := validateXrayHysteria2GeckoPacketSizes(config); err != nil {
+		return err
+	}
 	if strings.TrimSpace(config.GetTlsJson()) == "" {
 		return fmt.Errorf("TLS is required")
+	}
+	return nil
+}
+
+func validateXrayHysteria2GeckoPacketSizes(config *gen.XrayHysteria2Config) error {
+	hasMinPacketSize := config.MinPacketSize != nil
+	hasMaxPacketSize := config.MaxPacketSize != nil
+	if !hasMinPacketSize && !hasMaxPacketSize {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(config.GetObfsType()), "gecko") {
+		return fmt.Errorf("min_packet_size and max_packet_size are only supported with Gecko obfs")
+	}
+
+	minPacketSize := config.GetMinPacketSize()
+	maxPacketSize := config.GetMaxPacketSize()
+	if minPacketSize < 0 || maxPacketSize < 0 {
+		return fmt.Errorf("Gecko packet sizes cannot be negative")
+	}
+	if minPacketSize == 0 {
+		minPacketSize = xrayHysteria2GeckoDefaultMinPacketSize
+	}
+	if maxPacketSize == 0 {
+		maxPacketSize = xrayHysteria2GeckoDefaultMaxPacketSize
+	}
+	if minPacketSize > maxPacketSize {
+		return fmt.Errorf("invalid Gecko packet size range %d..%d", minPacketSize, maxPacketSize)
+	}
+	if maxPacketSize > xrayHysteria2GeckoMaxPacketSize {
+		return fmt.Errorf("Gecko max_packet_size cannot exceed %d", xrayHysteria2GeckoMaxPacketSize)
 	}
 	return nil
 }

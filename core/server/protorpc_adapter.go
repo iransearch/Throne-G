@@ -64,6 +64,12 @@ func (s *protoRPCServer) QueryConnections(in *gen.EmptyReq, out *gen.QueryConnec
 	})
 }
 
+func (s *protoRPCServer) CloseConnections(in *gen.CloseConnectionsRequest, out *gen.CloseConnectionsResponse) error {
+	return adaptProtoRPC(out, func() (*gen.CloseConnectionsResponse, error) {
+		return globalServer.CloseConnections(context.Background(), in)
+	})
+}
+
 func (s *protoRPCServer) SetSystemDNS(in *gen.SetSystemDNSRequest, out *gen.EmptyResp) error {
 	return setSystemDNSProtoRPC(in, out)
 }
@@ -112,6 +118,12 @@ func (s *protoRPCServer) GenWgKeyPair(in *gen.EmptyReq, out *gen.GenWgKeyPairRes
 	return adaptProtoRPC(out, func() (*gen.GenWgKeyPairResponse, error) { return globalServer.GenWgKeyPair(context.Background(), in) })
 }
 
+func (s *protoRPCServer) InstallDashboard(in *gen.InstallDashboardRequest, out *gen.ErrorResp) error {
+	return adaptProtoRPC(out, func() (*gen.ErrorResp, error) {
+		return globalServer.InstallDashboard(context.Background(), in)
+	})
+}
+
 func (s *protoRPCServer) QueryAutoSelectors(in *gen.EmptyReq, out *gen.QueryAutoSelectorsResponse) error {
 	return adaptProtoRPC(out, func() (*gen.QueryAutoSelectorsResponse, error) {
 		return globalServer.QueryAutoSelectors(context.Background(), in)
@@ -120,6 +132,24 @@ func (s *protoRPCServer) QueryAutoSelectors(in *gen.EmptyReq, out *gen.QueryAuto
 
 func (s *protoRPCServer) AutoSelectorAction(in *gen.AutoSelectorActionRequest, out *gen.ErrorResp) error {
 	return adaptProtoRPC(out, func() (*gen.ErrorResp, error) { return globalServer.AutoSelectorAction(context.Background(), in) })
+}
+
+func (s *protoRPCServer) QueryVPNStatus(in *gen.VPNStatusRequest, out *gen.VPNStatusResponse) error {
+	return adaptProtoRPC(out, func() (*gen.VPNStatusResponse, error) {
+		return globalServer.QueryVPNStatus(context.Background(), in)
+	})
+}
+
+func (s *protoRPCServer) SubmitVPNChallenge(in *gen.SubmitVPNChallengeRequest, out *gen.ErrorResp) error {
+	return adaptProtoRPC(out, func() (*gen.ErrorResp, error) {
+		return globalServer.SubmitVPNChallenge(context.Background(), in)
+	})
+}
+
+func (s *protoRPCServer) CancelVPNChallenge(in *gen.SubmitVPNChallengeRequest, out *gen.ErrorResp) error {
+	return adaptProtoRPC(out, func() (*gen.ErrorResp, error) {
+		return globalServer.CancelVPNChallenge(context.Background(), in)
+	})
 }
 
 var _ gen.LibcoreService = (*protoRPCServer)(nil)

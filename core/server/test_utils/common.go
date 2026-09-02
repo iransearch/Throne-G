@@ -23,7 +23,6 @@ const MaxConcurrentTests = 100
 // The GUI matches on this text, so the wording is part of the contract.
 var ErrTestAborted = errors.New("test aborted")
 
-// Scopes every probe in flight so StopTest can cancel them together.
 type testSession struct {
 	mu     sync.Mutex
 	ctx    context.Context
@@ -52,7 +51,6 @@ func (s *testSession) cancelAndRearm() {
 
 func TestContext() context.Context { return session.current() }
 
-// Aborts everything in flight and arms a fresh context for the next run.
 func CancelTests() { session.cancelAndRearm() }
 
 // Drains on read: each result is handed to the GUI exactly once.
@@ -98,7 +96,6 @@ func (b *resultBuffer[T]) Reclaim(owned []*T) {
 	b.results = kept
 }
 
-// The per-kind half of runBatch: measure, report an unmeasurable tag, publish.
 type batchProbe[T any] struct {
 	run     func(ctx context.Context, tag string, outbound adapter.Outbound) *T
 	fail    func(tag string, err error) *T
@@ -145,8 +142,7 @@ func runBatch[T any](ctx context.Context, i *boxbox.Box, outboundTags []string, 
 
 			outbound, found := outbounds.Outbound(t)
 			if !found {
-				// A tag can vanish between building the box and probing it. Panicking in a spawned
-				// goroutine is out of reach of the dispatcher's recover and would kill the core.
+				// A tag can vanish between building the box and probing it; a panic here is out of reach of the dispatcher's recover.
 				res := probe.fail(t, fmt.Errorf("no outbound with tag %s found", t))
 				store(t, res)
 				probe.publish(res)
@@ -171,7 +167,6 @@ func runBatch[T any](ctx context.Context, i *boxbox.Box, outboundTags []string, 
 	return res
 }
 
-// Routes every request through `dial`, passing the per-request context straight on.
 func dialerHTTPClient(dial func(ctx context.Context, network, address string) (net.Conn, error), timeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -183,7 +178,7 @@ func dialerHTTPClient(dial func(ctx context.Context, network, address string) (n
 	}
 }
 
-// Measures one outbound. Dials carry the batch context, so cancelling it tears them down.
+// Dials carry the batch context, not the per-request one, so cancelling the batch tears them down.
 func outboundHTTPClient(ctx context.Context, outbound adapter.Outbound, timeout time.Duration) *http.Client {
 	return dialerHTTPClient(func(_ context.Context, network, addr string) (net.Conn, error) {
 		return outbound.DialContext(ctx, "tcp", metadata.ParseSocksaddr(addr))
