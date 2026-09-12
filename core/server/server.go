@@ -770,6 +770,10 @@ func connMetaToProto(c *trafficcontrol.TrackerMetadata) *gen.ConnectionMetaData 
 	if !c.ClosedAt.IsZero() {
 		closedAt = c.ClosedAt.UnixMilli()
 	}
+	source := ""
+	if c.Metadata.Source.IsValid() {
+		source = c.Metadata.Source.String()
+	}
 	return &gen.ConnectionMetaData{
 		Id:          To(c.ID.String()),
 		CreatedAt:   To(c.CreatedAt.UnixMilli()),
@@ -784,6 +788,7 @@ func connMetaToProto(c *trafficcontrol.TrackerMetadata) *gen.ConnectionMetaData 
 		ProcessPath: To(processPath),
 		Chain:       c.Chain,
 		ClosedAt:    To(closedAt),
+		Source:      To(source),
 	}
 }
 
