@@ -642,11 +642,8 @@ func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, erro
 		}
 	}
 	if len(pending) > 0 {
-		timeout := defaultVPNStatusTimeout
-		if ms := in.GetVpnStatusTimeoutMs(); ms > 0 {
-			timeout = time.Duration(ms) * time.Millisecond
-		}
-		out.VpnStatus = collectVPNStatus(testCtx, env.box, pending, timeout)
+		// A snapshot: the probe already sat out the handshake, so a tunnel that settles only now never carried it.
+		out.VpnStatus = collectVPNStatus(testCtx, env.box, pending, 0)
 	}
 	return out, nil
 }
@@ -678,7 +675,8 @@ func (s *server) IPTest(ctx context.Context, in *gen.IPTestRequest) (*gen.IPTest
 	_ = boxdns.Start()
 
 	// Always builds its own box: there is no test-current variant of an IP test.
-	env, err := prepareTestEnv(false, in.GetNeedXray(), in.GetXrayConfig(),
+	const current = false
+	env, err := prepareTestEnv(current, in.GetNeedXray(), in.GetXrayConfig(),
 		in.XrayFullConfigs, in.GetConfig(), in.OutboundTags, in.GetUseDefaultOutbound(),
 		in.GetXrayOutboundDnsStrategy())
 	if err != nil {
@@ -688,7 +686,7 @@ func (s *server) IPTest(ctx context.Context, in *gen.IPTestRequest) (*gen.IPTest
 
 	timeout := time.Duration(in.GetTestTimeoutMs()) * time.Millisecond
 	results := test_utils.BatchIPTest(test_utils.TestContext(), env.box, env.tags,
-		int(in.GetMaxConcurrency()), timeout)
+		int(in.GetMaxConcurrency()), !current, timeout)
 
 	res := make([]*gen.IPTestRes, 0, len(results))
 	for idx, data := range results {

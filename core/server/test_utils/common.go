@@ -20,6 +20,11 @@ import (
 const FetchServersTimeout = 8 * time.Second
 const MaxConcurrentTests = 100
 
+const TunnelStartupTimeout = 5 * time.Second
+
+// Bounds the wait for a tunnel that refuses dials until its handshake completes.
+const TunnelHandshakeTimeout = 10 * time.Second
+
 // The GUI matches on this text, so the wording is part of the contract.
 var ErrTestAborted = errors.New("test aborted")
 
@@ -167,22 +172,174 @@ func runBatch[T any](ctx context.Context, i *boxbox.Box, outboundTags []string, 
 	return res
 }
 
-func dialerHTTPClient(dial func(ctx context.Context, network, address string) (net.Conn, error), timeout time.Duration) *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-				return dial(ctx, network, addr)
-			},
-		},
-		Timeout: timeout,
+// Remembers every conn a probe dials, so the closer can tear them down rather than leave them to a
+// transport that outlives the box they were dialed through.
+type probeDialer struct {
+	dial   func(ctx context.Context, network, address string) (net.Conn, error)
+	access sync.Mutex
+	conns  []net.Conn
+	closed bool
+}
+
+func (d *probeDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.access.Lock()
+	closed := d.closed
+	d.access.Unlock()
+	if closed {
+		return nil, net.ErrClosed
+	}
+	conn, err := d.dial(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	// The closer can land mid-dial; that conn is ours to close, not to hand out.
+	d.access.Lock()
+	if d.closed {
+		d.access.Unlock()
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
+	d.conns = append(d.conns, conn)
+	d.access.Unlock()
+	return conn, nil
+}
+
+// A proxied conn's Close can block on its own teardown handshake, so it never runs on the caller.
+func (d *probeDialer) Close() {
+	d.access.Lock()
+	conns := d.conns
+	d.conns = nil
+	d.closed = true
+	d.access.Unlock()
+	for _, conn := range conns {
+		go func(conn net.Conn) { _ = conn.Close() }(conn)
 	}
 }
 
-// Dials carry the batch context, not the per-request one, so cancelling the batch tears them down.
-func outboundHTTPClient(ctx context.Context, outbound adapter.Outbound, timeout time.Duration) *http.Client {
-	return dialerHTTPClient(func(_ context.Context, network, addr string) (net.Conn, error) {
-		return outbound.DialContext(ctx, "tcp", metadata.ParseSocksaddr(addr))
-	}, timeout)
+func dialerHTTPClient(dial func(ctx context.Context, network, address string) (net.Conn, error), timeout time.Duration) (*http.Client, func()) {
+	probe := &probeDialer{dial: dial}
+	transport := &http.Transport{DialContext: probe.DialContext}
+	return &http.Client{Transport: transport, Timeout: timeout}, func() {
+		probe.Close()
+		transport.CloseIdleConnections()
+	}
+}
+
+// Dials carry a child of the batch context, not the per-request one, so cancelling the batch tears
+// them down -- and so does the closer, leaving none inside the outbound once the probe returns.
+func outboundHTTPClient(ctx context.Context, outbound adapter.Outbound) (*http.Client, func()) {
+	dialCtx, cancelDials := context.WithCancel(ctx)
+	client, closeClient := dialerHTTPClient(func(_ context.Context, network, addr string) (net.Conn, error) {
+		return outbound.DialContext(dialCtx, "tcp", metadata.ParseSocksaddr(addr))
+	}, 0)
+	return client, func() {
+		cancelDials()
+		closeClient()
+	}
+}
+
+// Endpoint membership, not a type assertion: plain outbounds such as direct also satisfy adapter.Endpoint.
+func tunnelEndpoints(i *boxbox.Box, tag string) []adapter.Endpoint {
+	outbounds := i.Outbound()
+	endpoints := service.FromContext[adapter.EndpointManager](i.Context())
+	visited := make(map[string]bool)
+	pending := []string{tag}
+	var tunnels []adapter.Endpoint
+	for len(pending) > 0 {
+		tag = pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if visited[tag] {
+			continue
+		}
+		visited[tag] = true
+		outbound, found := outbounds.Outbound(tag)
+		if !found {
+			continue
+		}
+		if endpoint, isEndpoint := endpoints.Get(tag); isEndpoint {
+			tunnels = append(tunnels, endpoint)
+		}
+		pending = append(pending, outbound.Dependencies()...)
+	}
+	return tunnels
+}
+
+type tunnelHandshake struct {
+	updated  func() <-chan struct{}
+	snapshot func() (state string, failure string)
+}
+
+// OpenVPN and OpenConnect refuse dials until their handshake completes; other tunnels hold them instead.
+func handshakeOf(endpoint adapter.Endpoint) *tunnelHandshake {
+	switch typed := endpoint.(type) {
+	case adapter.OpenVPNEndpoint:
+		return &tunnelHandshake{
+			updated: typed.StatusUpdated,
+			snapshot: func() (string, string) {
+				status := typed.OpenVPNStatus()
+				return status.State, status.Error
+			},
+		}
+	case adapter.OpenConnectEndpoint:
+		return &tunnelHandshake{
+			updated: typed.StatusUpdated,
+			snapshot: func() (string, string) {
+				status := typed.OpenConnectStatus()
+				return status.State, status.Error
+			},
+		}
+	}
+	return nil
+}
+
+// Both protocols spell their states the same way.
+func (h *tunnelHandshake) await(ctx context.Context) error {
+	for {
+		// Subscribed before the snapshot, so a change in between still wakes us.
+		updated := h.updated()
+		state, failure := h.snapshot()
+		switch state {
+		case adapter.OpenVPNStateConnected:
+			return nil
+		case adapter.OpenVPNStateError:
+			return errors.New(failure)
+		case adapter.OpenVPNStateAuthPending:
+			return errors.New("waiting for authentication")
+		}
+		select {
+		case <-updated:
+		case <-ctx.Done():
+			return fmt.Errorf("handshake: %w", ctx.Err())
+		}
+	}
+}
+
+func awaitTunnels(ctx context.Context, i *boxbox.Box, tag string) error {
+	ctx, cancel := context.WithTimeout(ctx, TunnelHandshakeTimeout)
+	defer cancel()
+	for _, endpoint := range tunnelEndpoints(i, tag) {
+		handshake := handshakeOf(endpoint)
+		if handshake == nil {
+			continue
+		}
+		if err := handshake.await(ctx); err != nil {
+			return fmt.Errorf("%s: %w", endpoint.Type(), err)
+		}
+	}
+	return nil
+}
+
+func firstRequestTimeout(i *boxbox.Box, tag string, cold bool, timeout time.Duration) time.Duration {
+	if !cold {
+		return timeout
+	}
+	for _, endpoint := range tunnelEndpoints(i, tag) {
+		// An awaited tunnel is already up; only the others can still be holding the first dial.
+		if handshakeOf(endpoint) == nil {
+			return timeout + TunnelStartupTimeout
+		}
+	}
+	return timeout
 }
 
 func getNetDialer(dialer func(ctx context.Context, network string, destination metadata.Socksaddr) (net.Conn, error)) func(ctx context.Context, network string, address string) (net.Conn, error) {
@@ -191,26 +348,38 @@ func getNetDialer(dialer func(ctx context.Context, network string, destination m
 	}
 }
 
-func getSpeedtestServer(ctx context.Context, dialer func(ctx context.Context, network string, address string) (net.Conn, error)) (*speedtest.Server, error) {
-	clt := speedtest.New(speedtest.WithUserConfig(&speedtest.UserConfig{
-		DialContextFunc: dialer,
+func getSpeedtestServer(ctx context.Context, dialer func(ctx context.Context, network string, address string) (net.Conn, error)) (*speedtest.Server, func(), error) {
+	probe := &probeDialer{dial: dialer}
+	// speedtest.New builds its own transport and writes it back here; the servers it returns keep using it.
+	userConfig := &speedtest.UserConfig{
+		DialContextFunc: probe.DialContext,
 		PingMode:        speedtest.HTTP,
 		MaxConnections:  8,
-	}))
+	}
+	clt := speedtest.New(speedtest.WithUserConfig(userConfig))
+	closeClient := func() {
+		probe.Close()
+		if userConfig.T != nil {
+			userConfig.T.CloseIdleConnections()
+		}
+	}
 	fetchCtx, cancel := context.WithTimeout(ctx, FetchServersTimeout)
 	defer cancel()
 	srv, err := clt.FetchServerListContext(fetchCtx)
 	if err != nil {
-		return nil, err
+		closeClient()
+		return nil, nil, err
 	}
 	srv, err = srv.FindServer(nil)
 	if err != nil {
-		return nil, err
+		closeClient()
+		return nil, nil, err
 	}
 
 	if srv.Len() == 0 {
-		return nil, errors.New("no server found for speedTest")
+		closeClient()
+		return nil, nil, errors.New("no server found for speedTest")
 	}
 
-	return srv[0], nil
+	return srv[0], closeClient, nil
 }
