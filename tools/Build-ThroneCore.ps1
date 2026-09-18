@@ -295,7 +295,7 @@ Write-Host "Source repository: $sourceRepository"
 Write-Host "Source branch: $sourceBranch"
 # Use a fresh checkout for each run. Never pull/reset the user's local project
 # or fall back to old source if the network request fails.
-$sourceParent = Join-Path ([IO.Path]::GetTempPath()) 'ThroneCore-source-checkouts'
+$sourceParent = Join-Path $RepoRoot '.core-builder\source-checkouts'
 New-Directory $sourceParent
 $downloadedSource = Join-Path $sourceParent ([Guid]::NewGuid().ToString('N'))
 Invoke-Native 'git.exe' clone --depth 1 --single-branch --branch $sourceBranch $sourceRepository $downloadedSource

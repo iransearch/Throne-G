@@ -5,7 +5,7 @@ It does not build the Qt application.
 
 Each build automatically downloads the current tip of `update/fc668b60-core-only-1.3.0-beta.1` from `https://github.com/iransearch/Throne-G.git`. This is the custom Core branch with the Hysteria 2.12.3 migration. The builder does not use or modify a source checkout beside it. A failed download stops the build; there is no fallback to cached or local source.
 
-Both the downloaded checkout and the isolated build source are created under the Windows temporary directory (`ThroneCore-source-checkouts`), separately from the builder. Downloads and toolchains remain cached under `THRONE_CORE_BUILDER_ROOT` or `.core-builder`. The selected Core commit is printed before compilation and at successful completion, and saved in `BUILD-INFO.txt`. The branch tip is selected once per run so all targets use the same commit.
+Both the downloaded checkout and the isolated build source are retained under `.core-builder/source-checkouts` inside the builder folder, not the Windows temporary directory. Each run gets a separate checkout. Downloads and toolchains remain cached under `THRONE_CORE_BUILDER_ROOT` or `.core-builder`. The selected Core commit is printed before compilation and at successful completion, and saved in `BUILD-INFO.txt`. The branch tip is selected once per run so all targets use the same commit.
 
 The downloadable builder package contains only `build-core.cmd`, `build-thronebuilder.cmd`, `tools/`, and this guide. Git for Windows and network access are required. No Core source needs to be installed alongside the builder.
 
