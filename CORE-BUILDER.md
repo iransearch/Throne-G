@@ -1,9 +1,13 @@
 # ThroneCore local Windows builder
 
-This branch includes a local Windows builder for ThroneCore `1.3.0-beta.1` plus an IRSpeedy SGuard output mode.
+This branch includes a Windows builder for ThroneCore plus an IRSpeedy SGuard output mode.
 It does not build the Qt application.
 
-The Core source is based on `update/throne-1.3.0-beta.1-protorpc`. The previous custom Xray Hysteria2 implementation and the `Core: xray/sing-box` selector are not included. Hysteria2 Gecko obfs comes only from the official Throne dependencies pinned by `core/server/go.mod`.
+Each build automatically downloads the current tip of `update/fc668b60-core-only-1.3.0-beta.1` from `https://github.com/iransearch/Throne-G.git`. This is the custom Core branch with the Hysteria 2.12.3 migration. The builder does not use or modify a source checkout beside it. A failed download stops the build; there is no fallback to cached or local source.
+
+Both the downloaded checkout and the isolated build source are created under the Windows temporary directory (`ThroneCore-source-checkouts`), separately from the builder. Downloads and toolchains remain cached under `THRONE_CORE_BUILDER_ROOT` or `.core-builder`. The selected Core commit is printed before compilation and at successful completion, and saved in `BUILD-INFO.txt`. The branch tip is selected once per run so all targets use the same commit.
+
+The downloadable builder package contains only `build-core.cmd`, `build-thronebuilder.cmd`, `tools/`, and this guide. Git for Windows and network access are required. No Core source needs to be installed alongside the builder.
 
 ## ThroneBuilder.exe
 

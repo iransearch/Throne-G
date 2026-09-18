@@ -256,9 +256,6 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
 if ($null -eq (Get-Command git.exe -ErrorAction SilentlyContinue)) {
     throw 'Git for Windows is required and must be available in PATH.'
 }
-if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'core\server\go.mod'))) {
-    throw "Run this builder from a complete Throne-G source checkout: $RepoRoot"
-}
 if (-not [string]::IsNullOrWhiteSpace($env:THRONE_GO_PROXY)) {
     $env:GOPROXY = $env:THRONE_GO_PROXY
 } elseif ([string]::IsNullOrWhiteSpace($env:GOPROXY)) {
@@ -290,6 +287,28 @@ New-Directory $DownloadsDirectory
 New-Directory $ToolchainsDirectory
 New-Directory $ToolsDirectory
 New-Directory $OutputDirectory
+
+$sourceRepository = 'https://github.com/iransearch/Throne-G.git'
+$sourceBranch = 'update/fc668b60-core-only-1.3.0-beta.1'
+Write-Step 'Downloading the latest custom Core source'
+Write-Host "Source repository: $sourceRepository"
+Write-Host "Source branch: $sourceBranch"
+# Use a fresh checkout for each run. Never pull/reset the user's local project
+# or fall back to old source if the network request fails.
+$sourceParent = Join-Path ([IO.Path]::GetTempPath()) 'ThroneCore-source-checkouts'
+New-Directory $sourceParent
+$downloadedSource = Join-Path $sourceParent ([Guid]::NewGuid().ToString('N'))
+Invoke-Native 'git.exe' clone --depth 1 --single-branch --branch $sourceBranch $sourceRepository $downloadedSource
+if (-not (Test-Path -LiteralPath (Join-Path $downloadedSource 'core\server\go.mod'))) {
+    throw 'Downloaded branch does not contain core/server/go.mod. Build stopped.'
+}
+$RepoRoot = $downloadedSource
+$StagingDirectory = Join-Path $sourceParent ((Split-Path -Leaf $downloadedSource) + '-staging')
+$downloadedCommit = (& git.exe -C $RepoRoot rev-parse HEAD | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $downloadedCommit -notmatch '^[0-9a-f]{40}$') {
+    throw 'Could not identify the downloaded Core commit. Build stopped.'
+}
+Write-Host "Core commit selected for this build: $downloadedCommit" -ForegroundColor Cyan
 
 $modernArchive = Join-Path $DownloadsDirectory "go$ModernGoVersion.windows-amd64.zip"
 $legacyArchive = Join-Path $DownloadsDirectory "go-legacy-win7-$LegacyGoVersion.windows-amd64.zip"
@@ -374,6 +393,8 @@ Write-Step 'Writing checksums and build information'
 $checksumLines = New-Object Collections.Generic.List[string]
 $infoLines = New-Object Collections.Generic.List[string]
 $infoLines.Add("Source commit: $sourceCommit")
+$infoLines.Add("Source repository: $sourceRepository")
+$infoLines.Add("Source branch: $sourceBranch")
 $infoLines.Add("Source dirty: $dirty")
 $infoLines.Add("Built at UTC: $([DateTime]::UtcNow.ToString('o'))")
 $infoLines.Add("Modern Go: $ModernGoVersion")
