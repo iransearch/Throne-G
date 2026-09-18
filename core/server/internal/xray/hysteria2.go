@@ -177,7 +177,7 @@ func (o xrayHysteria2ObfsOptions) wrap(conn stdnet.PacketConn) (stdnet.PacketCon
 	case "salamander":
 		return hyobfs.WrapPacketConnSalamander(conn, []byte(o.password))
 	case "gecko":
-		return hyobfs.WrapPacketConnGecko(conn, hyobfs.GeckoOptions{
+		return wrapXrayGecko(conn, hyobfs.GeckoOptions{
 			Password:      []byte(o.password),
 			MinPacketSize: o.minPacketSize,
 			MaxPacketSize: o.maxPacketSize,
@@ -377,3 +377,4 @@ func singSocksaddrToXray(destination M.Socksaddr, network xnet.Network) xnet.Des
 	}
 	return xnet.Destination{Network: network, Address: address, Port: xnet.Port(destination.Port)}
 }
+
