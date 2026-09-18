@@ -4,7 +4,8 @@ param(
     [string]$OutputDirectory,
     [ValidateRange(1, 16)]
     [int]$Parallelism = 2,
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [switch]$ModernOnly
 )
 
 Set-StrictMode -Version Latest
@@ -319,7 +320,9 @@ $protocDirectory = Join-Path $ToolsDirectory "protoc-$ProtocVersion"
 
 Write-Step 'Preparing pinned build toolchains'
 Download-File "https://go.dev/dl/go$ModernGoVersion.windows-amd64.zip" $modernArchive
-Download-File "https://github.com/thongtech/go-legacy-win7/releases/download/v$LegacyGoVersion/go-legacy-win7-$LegacyGoVersion.windows_amd64.zip" $legacyArchive $LegacyGoSha256
+if (-not $ModernOnly) {
+    Download-File "https://github.com/thongtech/go-legacy-win7/releases/download/v$LegacyGoVersion/go-legacy-win7-$LegacyGoVersion.windows_amd64.zip" $legacyArchive $LegacyGoSha256
+}
 Download-File "https://github.com/protocolbuffers/protobuf/releases/download/v$ProtocVersion/protoc-$ProtocVersion-win64.zip" $protocArchive
 
 if (-not (Test-Path -LiteralPath (Join-Path $modernDirectory 'go\bin\go.exe'))) {
@@ -331,7 +334,7 @@ if (Test-Path -LiteralPath $legacyDirectory) {
         Where-Object { $_.FullName -match '\\bin\\go\.exe$' } |
         Select-Object -First 1
 }
-if ($null -eq $legacyReady) {
+if (-not $ModernOnly -and $null -eq $legacyReady) {
     Expand-ZipFresh $legacyArchive $legacyDirectory
 }
 if (-not (Test-Path -LiteralPath (Join-Path $protocDirectory 'bin\protoc.exe'))) {
@@ -339,10 +342,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $protocDirectory 'bin\protoc.exe')))
 }
 
 $modernGo = Find-GoExecutable $modernDirectory
-$legacyGo = Find-GoExecutable $legacyDirectory
+if (-not $ModernOnly) { $legacyGo = Find-GoExecutable $legacyDirectory }
 $protoc = Join-Path $protocDirectory 'bin\protoc.exe'
 Invoke-Native $modernGo version
-Invoke-Native $legacyGo version
+if (-not $ModernOnly) { Invoke-Native $legacyGo version }
 Invoke-Native $protoc --version
 
 Write-Step 'Installing pinned protobuf generators'
@@ -382,8 +385,10 @@ try {
 }
 
 Build-CoreTarget 'windows-amd64' $modernGo 'amd64' "$BaseTags,with_purego,with_naive_outbound" 0x8664 $serverDirectory
-Build-CoreTarget 'windowslegacy-amd64' $legacyGo 'amd64' $BaseTags 0x8664 $serverDirectory
-Build-CoreTarget 'windowslegacy-386' $legacyGo '386' $BaseTags 0x014c $serverDirectory
+if (-not $ModernOnly) {
+    Build-CoreTarget 'windowslegacy-amd64' $legacyGo 'amd64' $BaseTags 0x8664 $serverDirectory
+    Build-CoreTarget 'windowslegacy-386' $legacyGo '386' $BaseTags 0x014c $serverDirectory
+}
 
 Write-Step 'Downloading the modern Core runtime companion'
 $cronet = Join-Path $OutputDirectory 'windows-amd64\libcronet.dll'
@@ -395,10 +400,11 @@ $infoLines = New-Object Collections.Generic.List[string]
 $infoLines.Add("Source commit: $sourceCommit")
 $infoLines.Add("Source repository: $sourceRepository")
 $infoLines.Add("Source branch: $sourceBranch")
+$infoLines.Add("Source checkout: $RepoRoot")
 $infoLines.Add("Source dirty: $dirty")
 $infoLines.Add("Built at UTC: $([DateTime]::UtcNow.ToString('o'))")
 $infoLines.Add("Modern Go: $ModernGoVersion")
-$infoLines.Add("Windows 7 Go: $LegacyGoVersion")
+if (-not $ModernOnly) { $infoLines.Add("Windows 7 Go: $LegacyGoVersion") }
 $infoLines.Add('Dependencies: official source go.mod/go.sum (no builder overrides)')
 
 foreach ($file in Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File | Sort-Object FullName) {
@@ -411,7 +417,11 @@ foreach ($file in Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File | S
 [IO.File]::WriteAllLines((Join-Path $OutputDirectory 'SHA256SUMS.txt'), $checksumLines, [Text.Encoding]::ASCII)
 [IO.File]::WriteAllLines((Join-Path $OutputDirectory 'BUILD-INFO.txt'), $infoLines, [Text.Encoding]::UTF8)
 
-Write-Host "`nAll three Core builds completed successfully." -ForegroundColor Green
+if ($ModernOnly) {
+    Write-Host "`nModern x64 Core build completed successfully." -ForegroundColor Green
+} else {
+    Write-Host "`nAll three Core builds completed successfully." -ForegroundColor Green
+}
 Write-Host "Output directory: $OutputDirectory" -ForegroundColor Green
 Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File |
     Select-Object FullName, Length |

@@ -12,7 +12,7 @@ if not exist "%CSC%" (
   exit /b 1
 )
 
-echo Building ThroneBuilder 1.3.0-beta.1...
+echo Building ThroneBuilder...
 "%CSC%" /nologo /target:winexe /optimize+ /out:"%~dp0ThroneBuilder.exe" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "%~dp0tools\ThroneBuilder.cs"
 set "BUILD_EXIT=%ERRORLEVEL%"
 
@@ -28,5 +28,6 @@ echo.
 echo The GUI now offers:
 echo   - ThroneCore - 3 target folders
 echo   - SGuard - 4 files for IRSpeedyVPN
+echo   - Full Throne - GUI + Core, Windows x64
 pause
 exit /b 0

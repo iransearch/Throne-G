@@ -21,6 +21,7 @@ namespace ThroneBuilderApp
     {
         private readonly RadioButton coreMode;
         private readonly RadioButton sguardMode;
+        private readonly RadioButton guiMode;
         private readonly Button buildButton;
         private readonly Button openButton;
         private readonly Label statusLabel;
@@ -28,12 +29,12 @@ namespace ThroneBuilderApp
 
         public BuilderForm()
         {
-            Text = "ThroneBuilder 1.3.0-beta.1";
+            Text = "ThroneBuilder";
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = true;
-            ClientSize = new Size(520, 250);
+            ClientSize = new Size(520, 290);
             Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point);
 
             var title = new Label
@@ -60,10 +61,17 @@ namespace ThroneBuilderApp
                 Size = new Size(450, 28)
             };
 
+            guiMode = new RadioButton
+            {
+                Text = "Full Throne - GUI + Core (Windows x64)",
+                Location = new Point(30, 140),
+                Size = new Size(470, 28)
+            };
+
             buildButton = new Button
             {
                 Text = "Build",
-                Location = new Point(30, 155),
+                Location = new Point(30, 195),
                 Size = new Size(150, 40)
             };
             buildButton.Click += BuildButton_Click;
@@ -71,7 +79,7 @@ namespace ThroneBuilderApp
             openButton = new Button
             {
                 Text = "Open output",
-                Location = new Point(195, 155),
+                Location = new Point(195, 195),
                 Size = new Size(150, 40)
             };
             openButton.Click += OpenButton_Click;
@@ -80,13 +88,14 @@ namespace ThroneBuilderApp
             {
                 AutoSize = false,
                 Text = "Ready",
-                Location = new Point(30, 207),
+                Location = new Point(30, 247),
                 Size = new Size(460, 28)
             };
 
             Controls.Add(title);
             Controls.Add(coreMode);
             Controls.Add(sguardMode);
+            Controls.Add(guiMode);
             Controls.Add(buildButton);
             Controls.Add(openButton);
             Controls.Add(statusLabel);
@@ -99,12 +108,12 @@ namespace ThroneBuilderApp
 
         private string SelectedMode
         {
-            get { return sguardMode.Checked ? "--sguard" : "--core"; }
+            get { return guiMode.Checked ? "--gui" : (sguardMode.Checked ? "--sguard" : "--core"); }
         }
 
         private string SelectedOutput
         {
-            get { return Path.Combine(RepoRoot, sguardMode.Checked ? "SGuardBuilds" : "CoreBuilds"); }
+            get { return Path.Combine(RepoRoot, guiMode.Checked ? "ThroneBuilds" : (sguardMode.Checked ? "SGuardBuilds" : "CoreBuilds")); }
         }
 
         private void BuildButton_Click(object sender, EventArgs e)
@@ -140,7 +149,7 @@ namespace ThroneBuilderApp
                 activeBuild.EnableRaisingEvents = true;
                 activeBuild.Exited += ActiveBuild_Exited;
                 buildButton.Enabled = false;
-                statusLabel.Text = sguardMode.Checked ? "Building 4 SGuard files..." : "Building 3 ThroneCore targets...";
+                statusLabel.Text = guiMode.Checked ? "Building full Throne GUI + Core..." : (sguardMode.Checked ? "Building 4 SGuard files..." : "Building 3 ThroneCore targets...");
             }
             catch (Exception ex)
             {

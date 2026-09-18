@@ -1,7 +1,7 @@
 # ThroneCore local Windows builder
 
 This branch includes a Windows builder for ThroneCore plus an IRSpeedy SGuard output mode.
-It does not build the Qt application.
+It can also build the complete Qt application and matching Core for modern Windows x64.
 
 Each build automatically downloads the current tip of `update/fc668b60-core-only-1.3.0-beta.1` from `https://github.com/iransearch/Throne-G.git`. This is the custom Core branch with the Hysteria 2.12.3 migration. The builder does not use or modify a source checkout beside it. A failed download stops the build; there is no fallback to cached or local source.
 
@@ -13,12 +13,23 @@ The downloadable builder package contains only `build-core.cmd`, `build-thronebu
 
 Run `build-thronebuilder.cmd` once to compile `ThroneBuilder.exe` with the .NET Framework C# compiler that ships with Windows/.NET Framework.
 
-The GUI offers two choices:
+The GUI offers three choices:
 
 1. `ThroneCore - 3 target folders`
 2. `SGuard - 4 files for IRSpeedyVPN`
+3. `Full Throne - GUI + Core (Windows x64)`
 
 The same choices are also available from `build-core.cmd` if you prefer the console menu.
+
+## Full Throne GUI + Core
+
+Re-run `build-thronebuilder.cmd` after updating the builder files to show the new option, or run `build-core.cmd --gui` directly.
+
+Install Visual Studio 2022 Build Tools with Desktop development with C++ and a Windows SDK, CMake (standalone or the Visual Studio CMake component), 7-Zip, Git for Windows, and curl. The builder locates Visual Studio through vswhere and downloads Ninja 1.13.2, Qt 6.11.1 x64 and OpenSSL automatically. It does not install Visual Studio or CMake. Use `tools/Build-ThroneWindows.ps1 -ValidateOnly` to check for the required local tools without downloading or building.
+
+The full build invokes the Core builder in modern-x64-only mode, then uses that exact downloaded checkout for the GUI. It never fetches a second, potentially newer GUI revision. Source remains under `.core-builder/source-checkouts` beside the builder; GUI build files and dependencies use the builder cache. The existing three-target Core and SGuard modes are preserved.
+
+`ThroneBuilds` receives a separate portable folder and ZIP for each successful run, containing Throne.exe, ThroneCore.exe, libcronet.dll, updater.exe, BUILD-INFO.txt, SHA256SUMS.txt, and any needed Qt/OpenSSL DLLs. Both GUI and Core commit identifiers are recorded. No executable is built by downloading this builder package; compilation runs on your Windows machine.
 
 ## SGuard output
 
