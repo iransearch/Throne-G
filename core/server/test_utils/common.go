@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ThroneCore/internal/boxbox"
+	"ThroneCore/internal/netdiag"
 
 	"github.com/Mahdi-zarei/speedtest-go/speedtest"
 	"github.com/sagernet/sing-box/adapter"
@@ -56,7 +57,10 @@ func (s *testSession) cancelAndRearm() {
 
 func TestContext() context.Context { return session.current() }
 
-func CancelTests() { session.cancelAndRearm() }
+func CancelTests() {
+	netdiag.Emit("tests-cancel", 0, "reason=stop-test")
+	session.cancelAndRearm()
+}
 
 // Drains on read: each result is handed to the GUI exactly once.
 type resultBuffer[T any] struct {

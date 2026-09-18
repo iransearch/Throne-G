@@ -1,6 +1,7 @@
 package boxbox
 
 import (
+	"ThroneCore/internal/netdiag"
 	"context"
 	"fmt"
 	"io"
@@ -115,6 +116,8 @@ func New(options Options) (*Box, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = netdiag.WithBox(ctx)
+	netdiag.Emit("box-created", netdiag.Box(ctx), "")
 	ctx = service.ContextWithDefaultRegistry(ctx)
 
 	endpointRegistry := service.FromContext[adapter.EndpointRegistry](ctx)
@@ -133,6 +136,8 @@ func New(options Options) (*Box, error) {
 	if outboundRegistry == nil {
 		return nil, E.New("missing outbound registry in context")
 	}
+	// Also cover contexts made by upstream box.Context (the normal RPC path).
+	observeHysteriaRegistry(outboundRegistry)
 	if dnsTransportRegistry == nil {
 		return nil, E.New("missing DNS transport registry in context")
 	}
@@ -504,6 +509,7 @@ func (s *Box) PreStart() error {
 }
 
 func (s *Box) Start() error {
+	netdiag.Emit("box-start", netdiag.Box(s.ctx), "")
 	err := s.start()
 	if err != nil {
 		// TODO: remove catch error
@@ -594,6 +600,7 @@ func (s *Box) start() error {
 }
 
 func (s *Box) Close() error {
+	netdiag.Emit("box-close", netdiag.Box(s.ctx), "context="+netdiag.ContextState(s.ctx))
 	select {
 	case <-s.done:
 		return os.ErrClosed

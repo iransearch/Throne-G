@@ -5,6 +5,7 @@ import (
 	"ThroneCore/internal/boxbox"
 	"ThroneCore/internal/boxdns"
 	"ThroneCore/internal/boxmain"
+	"ThroneCore/internal/netdiag"
 	"ThroneCore/internal/process"
 	"ThroneCore/internal/sys"
 	"ThroneCore/internal/wg"
@@ -374,6 +375,7 @@ func speedTestResultToProto(res test_utils.SpeedTestResult) *gen.SpeedTestResult
 }
 
 func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.ErrorResp, _ error) {
+	netdiag.Emit("rpc-start", 0, "")
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
 
@@ -528,6 +530,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 }
 
 func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (out *gen.ErrorResp, _ error) {
+	netdiag.Emit("rpc-stop", 0, "")
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
 
@@ -609,6 +612,8 @@ func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, erro
 		return nil, err
 	}
 	defer env.close()
+	netdiag.Emit("test-environment", netdiag.Box(env.box.Context()), fmt.Sprintf("current=%t config=%s", in.GetTestCurrent(), netdiag.Hash(in.GetConfig())))
+	defer netdiag.Emit("test-return", netdiag.Box(env.box.Context()), "")
 
 	// Held, not re-read: StopTest rearms a fresh context, uncancelled.
 	testCtx := test_utils.TestContext()
@@ -649,6 +654,7 @@ func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, erro
 }
 
 func (s *server) StopTest(ctx context.Context, in *gen.EmptyReq) (*gen.EmptyResp, error) {
+	netdiag.Emit("rpc-stoptest", 0, "")
 	test_utils.CancelTests()
 
 	return &gen.EmptyResp{}, nil

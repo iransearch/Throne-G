@@ -1,6 +1,7 @@
 package boxdns
 
 import (
+	"ThroneCore/internal/netdiag"
 	"fmt"
 	"sync"
 
@@ -75,6 +76,13 @@ func init() {
 	}
 	DnsManagerInstance = &DnsManager{Monitor: monitor}
 	monitor.RegisterCallback(DnsManagerInstance.HandleSystemDNS)
+	monitor.RegisterCallback(func(ifc *control.Interface, flags int) {
+		index := -1
+		if ifc != nil {
+			index = ifc.Index
+		}
+		netdiag.Emit("default-interface", 0, fmt.Sprintf("index=%d flags=%d", index, flags))
+	})
 	networkMonitorStarter = newDeferredStarter(func() error {
 		if err := updMonitor.Start(); err != nil {
 			fmt.Println("Could not start updMonitor")

@@ -1,7 +1,9 @@
 package test_utils
 
 import (
+	"ThroneCore/internal/netdiag"
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -25,8 +27,21 @@ func BatchURLTest(ctx context.Context, i *boxbox.Box, outboundTags []string, url
 		timeout = URLTestTimeout
 	}
 
+	batchID := netdiag.ID()
+	boxID := netdiag.Box(i.Context())
+	netdiag.Emit("test-begin", boxID, fmt.Sprintf("test=%d count=%d timeoutMs=%d", batchID, len(outboundTags), timeout.Milliseconds()))
+	defer netdiag.Emit("test-end", boxID, fmt.Sprintf("test=%d", batchID))
 	results := runBatch(ctx, i, outboundTags, maxConcurrency, batchProbe[URLTestResult]{
-		run: func(ctx context.Context, tag string, outbound adapter.Outbound) *URLTestResult {
+		run: func(ctx context.Context, tag string, outbound adapter.Outbound) (result *URLTestResult) {
+			begin := time.Now()
+			netdiag.Emit("probe-begin", boxID, fmt.Sprintf("test=%d tag=%s", batchID, netdiag.Hash(tag)))
+			defer func() {
+				kind := "no-result"
+				if result != nil {
+					kind = netdiag.ErrorKind(result.Error)
+				}
+				netdiag.Emit("probe-end", boxID, fmt.Sprintf("test=%d tag=%s error=%s context=%s elapsedMs=%d", batchID, netdiag.Hash(tag), kind, netdiag.ContextState(ctx), time.Since(begin).Milliseconds()))
+			}()
 			if err := awaitTunnels(ctx, i, tag); err != nil {
 				return &URLTestResult{Tag: tag, Error: err}
 			}
