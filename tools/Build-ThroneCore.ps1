@@ -332,6 +332,18 @@ Invoke-Go $modernGo install "google.golang.org/protobuf/cmd/protoc-gen-go@$Proto
 Invoke-Go $modernGo install "github.com/chai2010/protorpc/protoc-gen-protorpc@$ProtocGenProtoRpcVersion"
 
 Write-Step 'Preparing an isolated source copy'
+$sourceCommit = (& git.exe -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceCommit)) {
+    $sourceCommit = 'unknown (source has no Git metadata)'
+    $dirty = 'unknown'
+} else {
+    $sourceStatus = (& git.exe -C $RepoRoot status --porcelain --untracked-files=normal -- core/server core/protorpc 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        $dirty = 'unknown'
+    } else {
+        $dirty = -not [string]::IsNullOrWhiteSpace($sourceStatus)
+    }
+}
 Copy-SourceTree $StagingDirectory
 $serverDirectory = Join-Path $StagingDirectory 'core\server'
 $genDirectory = Join-Path $serverDirectory 'gen'
@@ -353,8 +365,6 @@ $cronet = Join-Path $OutputDirectory 'windows-amd64\libcronet.dll'
 Download-File 'https://github.com/SagerNet/cronet-go/releases/latest/download/libcronet-windows-amd64.dll' $cronet
 
 Write-Step 'Writing checksums and build information'
-$sourceCommit = (& git.exe -C $RepoRoot rev-parse HEAD | Out-String).Trim()
-$dirty = -not [string]::IsNullOrWhiteSpace((& git.exe -C $RepoRoot status --porcelain | Out-String).Trim())
 $checksumLines = New-Object Collections.Generic.List[string]
 $infoLines = New-Object Collections.Generic.List[string]
 $infoLines.Add("Source commit: $sourceCommit")
@@ -379,3 +389,5 @@ Write-Host "Output directory: $OutputDirectory" -ForegroundColor Green
 Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File |
     Select-Object FullName, Length |
     Format-Table -AutoSize
+Write-Host "Built from commit: $sourceCommit" -ForegroundColor Cyan
+Write-Host "Core source has uncommitted changes: $dirty" -ForegroundColor Cyan

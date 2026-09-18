@@ -152,6 +152,12 @@ if ($helpText -notmatch '(?im)probe-mode') {
 }
 
 Write-Host '--probe-mode is present.' -ForegroundColor Green
+$buildInfoPath = Join-Path $WorkOutput 'BUILD-INFO.txt'
+$sourceSummary = @('Source commit: unknown', 'Source dirty: unknown')
+if (Test-Path -LiteralPath $buildInfoPath) {
+    Copy-Item -LiteralPath $buildInfoPath -Destination (Join-Path $OutputDirectory 'BUILD-INFO.txt') -Force
+    $sourceSummary = Get-Content -LiteralPath $buildInfoPath | Where-Object { $_ -match '^Source (commit|dirty):' }
+}
 Write-Host "`nSGuard build completed successfully." -ForegroundColor Green
 Write-Host "Output directory: $OutputDirectory" -ForegroundColor Green
 Get-ChildItem -LiteralPath $OutputDirectory -Filter 'SGuard*.exe' -File |
@@ -159,3 +165,6 @@ Get-ChildItem -LiteralPath $OutputDirectory -Filter 'SGuard*.exe' -File |
     ForEach-Object {
         Write-Host ("{0,-16} {1,12} bytes  SHA256={2}" -f $_.Name, $_.Length, (Get-Sha256 $_.FullName))
     }
+foreach ($line in $sourceSummary) {
+    Write-Host $line -ForegroundColor Cyan
+}
