@@ -4,6 +4,8 @@ go 1.26.0
 
 require (
 	github.com/Mahdi-zarei/speedtest-go v1.7.13-0.20260107171856-79c565dfd83a
+	github.com/apernet/hysteria/core/v2 v2.12.3
+	github.com/apernet/hysteria/extras/v2 v2.12.3
 	github.com/chai2010/protorpc v0.0.0-00010101000000-000000000000
 	github.com/dustin/go-humanize v1.0.1
 	github.com/gofrs/uuid/v5 v5.5.1
@@ -41,7 +43,7 @@ require (
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/anthropics/anthropic-sdk-go v1.26.0 // indirect
 	github.com/anytls/sing-anytls v0.0.11 // indirect
-	github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e // indirect
+	github.com/apernet/quic-go v0.62.1-0.20260912175848-73339f7edbb9 // indirect
 	github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02 // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
@@ -93,6 +95,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/koron/go-ssdp v0.0.4 // indirect
 	github.com/kr/fs v0.1.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
 	github.com/libdns/acmedns v0.5.0 // indirect
 	github.com/libdns/alidns v1.0.6 // indirect
 	github.com/libdns/cloudflare v0.2.2 // indirect
@@ -174,6 +177,8 @@ require (
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/smallstep/pkcs7 v0.1.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/stretchr/objx v0.5.3 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd // indirect
@@ -197,6 +202,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect

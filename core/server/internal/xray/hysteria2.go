@@ -10,11 +10,12 @@ import (
 	"sync"
 	"time"
 
+	hyclient "github.com/apernet/hysteria/core/v2/client"
+	hyobfs "github.com/apernet/hysteria/extras/v2/obfs"
 	sbtls "github.com/sagernet/sing-box/common/tls"
 	sblog "github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-quic/hysteria"
-	hy2 "github.com/sagernet/sing-quic/hysteria2"
+	hytransport "github.com/sagernet/sing-quic/hysteria"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/xtls/xray-core/common"
 	xbuf "github.com/xtls/xray-core/common/buf"
@@ -27,7 +28,10 @@ import (
 	"github.com/xtls/xray-core/transport/internet"
 )
 
-const xrayHysteria2Protocol = "throne-hysteria2"
+const (
+	xrayHysteria2Protocol = "throne-hysteria2"
+	megabitToBytes        = 1_000_000 / 8
+)
 
 func init() {
 	common.Must(common.RegisterConfig((*gen.XrayHysteria2Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
@@ -39,7 +43,7 @@ type xrayHysteria2Outbound struct {
 	config *gen.XrayHysteria2Config
 
 	clientMu sync.Mutex
-	client   *hy2.Client
+	client   hyclient.Client
 }
 
 var _ proxy.Outbound = (*xrayHysteria2Outbound)(nil)
@@ -57,18 +61,31 @@ func (h *xrayHysteria2Outbound) Close() error {
 	h.client = nil
 	h.clientMu.Unlock()
 	if client != nil {
-		return client.CloseWithError(stdnet.ErrClosed)
+		return client.Close()
 	}
 	return nil
 }
 
-func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.Dialer) (*hy2.Client, error) {
+func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.Dialer) (hyclient.Client, error) {
 	h.clientMu.Lock()
 	defer h.clientMu.Unlock()
 	if h.client != nil {
 		return h.client, nil
 	}
 
+	lifetimeCtx := context.WithoutCancel(ctx)
+	configFunc := func() (*hyclient.Config, error) {
+		return h.clientConfig(lifetimeCtx, dialer)
+	}
+	client, err := hyclient.NewReconnectableClient(configFunc, nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("hysteria2 xray: create Hysteria core v2.12.3 client: %w", err)
+	}
+	h.client = client
+	return client, nil
+}
+
+func (h *xrayHysteria2Outbound) clientConfig(ctx context.Context, dialer internet.Dialer) (*hyclient.Config, error) {
 	var tlsOptions option.OutboundTLSOptions
 	if err := json.Unmarshal([]byte(h.config.GetTlsJson()), &tlsOptions); err != nil {
 		return nil, fmt.Errorf("hysteria2 xray: invalid TLS options: %w", err)
@@ -77,10 +94,13 @@ func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.D
 		return nil, fmt.Errorf("hysteria2 xray: TLS is required")
 	}
 	logger := sblog.NewNOPFactory().Logger()
-	lifetimeCtx := context.WithoutCancel(ctx)
-	tlsConfig, err := sbtls.NewClient(lifetimeCtx, logger, h.config.GetServer(), tlsOptions)
+	singTLSConfig, err := sbtls.NewClient(ctx, logger, h.config.GetServer(), tlsOptions)
 	if err != nil {
 		return nil, fmt.Errorf("hysteria2 xray: create TLS client: %w", err)
+	}
+	stdTLSConfig, err := singTLSConfig.STDConfig()
+	if err != nil {
+		return nil, fmt.Errorf("hysteria2 xray: Hysteria core requires standard Go TLS: %w", err)
 	}
 
 	var hopInterval time.Duration
@@ -91,46 +111,146 @@ func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.D
 		}
 	}
 
-	clientOptions := hy2.ClientOptions{
-		Context:            lifetimeCtx,
-		Dialer:             &xrayHysteriaServerDialer{dialer: dialer},
-		Logger:             logger,
-		ServerAddress:      M.ParseSocksaddrHostPort(h.config.GetServer(), uint16(h.config.GetServerPort())),
-		ServerPorts:        append([]string(nil), h.config.GetServerPorts()...),
-		HopInterval:        hopInterval,
-		SendBPS:            uint64(h.config.GetUpMbps()) * hysteria.MbpsToBps,
-		ReceiveBPS:         uint64(h.config.GetDownMbps()) * hysteria.MbpsToBps,
-		Password:           h.config.GetPassword(),
-		TLSConfig:          tlsConfig,
-		UDPDisabled:        false,
-	}
-	if err := applyXrayHysteria2Obfs(&clientOptions, h.config); err != nil {
+	serverAddress := M.ParseSocksaddrHostPort(h.config.GetServer(), uint16(h.config.GetServerPort()))
+	obfsOptions, err := parseXrayHysteria2Obfs(h.config)
+	if err != nil {
 		return nil, err
 	}
 
-	client, err := hy2.NewClient(clientOptions)
-	if err != nil {
-		return nil, fmt.Errorf("hysteria2 xray: create client: %w", err)
-	}
-	h.client = client
-	return client, nil
+	return &hyclient.Config{
+		ConnFactory: &xrayHysteria2ConnFactory{
+			ctx:           ctx,
+			dialer:        dialer,
+			serverAddress: serverAddress,
+			serverPorts:   append([]string(nil), h.config.GetServerPorts()...),
+			hopInterval:   hopInterval,
+			obfs:          obfsOptions,
+		},
+		ServerAddr: xrayHysteria2ServerAddr{address: serverAddress},
+		Auth:       h.config.GetPassword(),
+		TLSConfig: hyclient.TLSConfig{
+			ServerName:            stdTLSConfig.ServerName,
+			InsecureSkipVerify:    stdTLSConfig.InsecureSkipVerify,
+			VerifyPeerCertificate: stdTLSConfig.VerifyPeerCertificate,
+			RootCAs:               stdTLSConfig.RootCAs,
+			GetClientCertificate:  stdTLSConfig.GetClientCertificate,
+			ECHConfigList:         stdTLSConfig.EncryptedClientHelloConfigList,
+		},
+		BandwidthConfig: hyclient.BandwidthConfig{
+			MaxTx: uint64(h.config.GetUpMbps()) * megabitToBytes,
+			MaxRx: uint64(h.config.GetDownMbps()) * megabitToBytes,
+		},
+	}, nil
 }
 
-func applyXrayHysteria2Obfs(options *hy2.ClientOptions, config *gen.XrayHysteria2Config) error {
+type xrayHysteria2ObfsOptions struct {
+	typeName      string
+	password      string
+	minPacketSize int
+	maxPacketSize int
+}
+
+func parseXrayHysteria2Obfs(config *gen.XrayHysteria2Config) (xrayHysteria2ObfsOptions, error) {
 	if config.GetObfsPassword() == "" {
-		return nil
+		return xrayHysteria2ObfsOptions{}, nil
 	}
-	switch strings.ToLower(config.GetObfsType()) {
-	case "", hy2.ObfsTypeSalamander:
-		options.SalamanderPassword = config.GetObfsPassword()
-	case hy2.ObfsTypeGecko:
-		options.GeckoPassword = config.GetObfsPassword()
-		options.GeckoMinPacketSize = int(config.GetMinPacketSize())
-		options.GeckoMaxPacketSize = int(config.GetMaxPacketSize())
+	options := xrayHysteria2ObfsOptions{
+		typeName: strings.ToLower(config.GetObfsType()),
+		password: config.GetObfsPassword(),
+	}
+	switch options.typeName {
+	case "", "salamander":
+		options.typeName = "salamander"
+	case "gecko":
+		options.minPacketSize = int(config.GetMinPacketSize())
+		options.maxPacketSize = int(config.GetMaxPacketSize())
 	default:
-		return fmt.Errorf("hysteria2 xray: unsupported obfs type %q", config.GetObfsType())
+		return xrayHysteria2ObfsOptions{}, fmt.Errorf("hysteria2 xray: unsupported obfs type %q", config.GetObfsType())
 	}
-	return nil
+	return options, nil
+}
+
+func (o xrayHysteria2ObfsOptions) wrap(conn stdnet.PacketConn) (stdnet.PacketConn, error) {
+	switch o.typeName {
+	case "":
+		return conn, nil
+	case "salamander":
+		return hyobfs.WrapPacketConnSalamander(conn, []byte(o.password))
+	case "gecko":
+		return hyobfs.WrapPacketConnGecko(conn, hyobfs.GeckoOptions{
+			Password:      []byte(o.password),
+			MinPacketSize: o.minPacketSize,
+			MaxPacketSize: o.maxPacketSize,
+		})
+	default:
+		return nil, fmt.Errorf("hysteria2 xray: unsupported obfs type %q", o.typeName)
+	}
+}
+
+type xrayHysteria2ConnFactory struct {
+	ctx           context.Context
+	dialer        internet.Dialer
+	serverAddress M.Socksaddr
+	serverPorts   []string
+	hopInterval   time.Duration
+	obfs          xrayHysteria2ObfsOptions
+}
+
+func (f *xrayHysteria2ConnFactory) New(stdnet.Addr) (stdnet.PacketConn, error) {
+	dial := func(destination M.Socksaddr) (stdnet.Conn, error) {
+		target := singSocksaddrToXray(destination, xnet.Network_UDP)
+		ctx := f.ctx
+		if outbounds := session.OutboundsFromContext(ctx); len(outbounds) == 0 {
+			ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{Target: target}})
+		}
+		return f.dialer.Dial(ctx, target)
+	}
+
+	var conn stdnet.Conn
+	var err error
+	if len(f.serverPorts) == 0 {
+		conn, err = dial(f.serverAddress)
+	} else {
+		ports, parseErr := hytransport.ParsePorts(f.serverPorts)
+		if parseErr != nil {
+			return nil, fmt.Errorf("hysteria2 xray: invalid server ports: %w", parseErr)
+		}
+		conn, err = hytransport.NewHopConn(dial, f.serverAddress, ports, f.hopInterval, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	packetConn := &xrayHysteria2ConnectedPacketConn{
+		Conn:       conn,
+		remoteAddr: xrayHysteria2ServerAddr{address: f.serverAddress},
+	}
+	wrapped, err := f.obfs.wrap(packetConn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("hysteria2 xray: configure obfs: %w", err)
+	}
+	return wrapped, nil
+}
+
+type xrayHysteria2ServerAddr struct {
+	address M.Socksaddr
+}
+
+func (a xrayHysteria2ServerAddr) Network() string { return "udp" }
+func (a xrayHysteria2ServerAddr) String() string  { return a.address.String() }
+
+type xrayHysteria2ConnectedPacketConn struct {
+	stdnet.Conn
+	remoteAddr stdnet.Addr
+}
+
+func (c *xrayHysteria2ConnectedPacketConn) ReadFrom(payload []byte) (int, stdnet.Addr, error) {
+	n, err := c.Read(payload)
+	return n, c.remoteAddr, err
+}
+
+func (c *xrayHysteria2ConnectedPacketConn) WriteTo(payload []byte, _ stdnet.Addr) (int, error) {
+	return c.Write(payload)
 }
 
 func (h *xrayHysteria2Outbound) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
@@ -157,8 +277,8 @@ func (h *xrayHysteria2Outbound) Process(ctx context.Context, link *transport.Lin
 	}
 }
 
-func (h *xrayHysteria2Outbound) processTCP(ctx context.Context, link *transport.Link, client *hy2.Client, target xnet.Destination) error {
-	conn, err := client.DialConn(ctx, xrayDestinationToSing(target))
+func (h *xrayHysteria2Outbound) processTCP(ctx context.Context, link *transport.Link, client hyclient.Client, target xnet.Destination) error {
+	conn, err := client.TCP(xrayDestinationToSing(target).String())
 	if err != nil {
 		return xerrors.New("hysteria2 xray: dial target ", target).Base(err)
 	}
@@ -182,21 +302,21 @@ func (h *xrayHysteria2Outbound) processTCP(ctx context.Context, link *transport.
 	return nil
 }
 
-func (h *xrayHysteria2Outbound) processUDP(ctx context.Context, link *transport.Link, client *hy2.Client, target xnet.Destination) error {
-	packetConn, err := client.ListenPacket(ctx)
+func (h *xrayHysteria2Outbound) processUDP(ctx context.Context, link *transport.Link, client hyclient.Client, target xnet.Destination) error {
+	udpConn, err := client.UDP()
 	if err != nil {
 		return xerrors.New("hysteria2 xray: open UDP session").Base(err)
 	}
-	defer packetConn.Close()
+	defer udpConn.Close()
 
 	requestDone := func() error {
-		if err := xbuf.Copy(link.Reader, &xrayHysteriaPacketWriter{conn: packetConn, defaultTarget: target}); err != nil {
+		if err := xbuf.Copy(link.Reader, &xrayHysteriaPacketWriter{conn: udpConn, defaultTarget: target}); err != nil {
 			return xerrors.New("hysteria2 xray: UDP upload failed").Base(err)
 		}
 		return nil
 	}
 	responseDone := func() error {
-		if err := xbuf.Copy(&xrayHysteriaPacketReader{conn: packetConn}, link.Writer); err != nil {
+		if err := xbuf.Copy(&xrayHysteriaPacketReader{conn: udpConn}, link.Writer); err != nil {
 			return xerrors.New("hysteria2 xray: UDP download failed").Base(err)
 		}
 		return nil
@@ -207,24 +327,8 @@ func (h *xrayHysteria2Outbound) processUDP(ctx context.Context, link *transport.
 	return nil
 }
 
-type xrayHysteriaServerDialer struct {
-	dialer internet.Dialer
-}
-
-func (d *xrayHysteriaServerDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (stdnet.Conn, error) {
-	target := singDestinationToXray(destination, network)
-	if outbounds := session.OutboundsFromContext(ctx); len(outbounds) == 0 {
-		ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{Target: target}})
-	}
-	return d.dialer.Dial(ctx, target)
-}
-
-func (d *xrayHysteriaServerDialer) ListenPacket(context.Context, M.Socksaddr) (stdnet.PacketConn, error) {
-	return nil, fmt.Errorf("hysteria2 xray: unconnected packet sockets are not supported")
-}
-
 type xrayHysteriaPacketWriter struct {
-	conn          stdnet.PacketConn
+	conn          hyclient.HyUDPConn
 	defaultTarget xnet.Destination
 }
 
@@ -235,7 +339,7 @@ func (w *xrayHysteriaPacketWriter) WriteMultiBuffer(mb xbuf.MultiBuffer) error {
 		if buffer.UDP != nil && buffer.UDP.IsValid() {
 			target = *buffer.UDP
 		}
-		if _, err := w.conn.WriteTo(buffer.Bytes(), xrayDestinationToSing(target)); err != nil {
+		if err := w.conn.Send(buffer.Bytes(), xrayDestinationToSing(target).String()); err != nil {
 			return err
 		}
 	}
@@ -243,18 +347,16 @@ func (w *xrayHysteriaPacketWriter) WriteMultiBuffer(mb xbuf.MultiBuffer) error {
 }
 
 type xrayHysteriaPacketReader struct {
-	conn stdnet.PacketConn
+	conn hyclient.HyUDPConn
 }
 
 func (r *xrayHysteriaPacketReader) ReadMultiBuffer() (xbuf.MultiBuffer, error) {
-	payload := make([]byte, 65535)
-	n, addr, err := r.conn.ReadFrom(payload)
+	payload, addr, err := r.conn.Receive()
 	if err != nil {
 		return nil, err
 	}
-	buffer := xbuf.FromBytes(payload[:n])
-	source := M.SocksaddrFromNet(addr)
-	destination := singSocksaddrToXray(source, xnet.Network_UDP)
+	buffer := xbuf.FromBytes(payload)
+	destination := singSocksaddrToXray(M.ParseSocksaddr(addr), xnet.Network_UDP)
 	buffer.UDP = &destination
 	return xbuf.MultiBuffer{buffer}, nil
 }
@@ -264,14 +366,6 @@ func xrayDestinationToSing(destination xnet.Destination) M.Socksaddr {
 		return M.Socksaddr{Fqdn: destination.Address.Domain(), Port: uint16(destination.Port)}
 	}
 	return M.ParseSocksaddrHostPort(destination.Address.String(), uint16(destination.Port))
-}
-
-func singDestinationToXray(destination M.Socksaddr, network string) xnet.Destination {
-	xnetwork := xnet.Network_UDP
-	if strings.HasPrefix(strings.ToLower(network), "tcp") {
-		xnetwork = xnet.Network_TCP
-	}
-	return singSocksaddrToXray(destination, xnetwork)
 }
 
 func singSocksaddrToXray(destination M.Socksaddr, network xnet.Network) xnet.Destination {

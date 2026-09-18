@@ -2,11 +2,10 @@ package xray
 
 import (
 	"ThroneCore/gen"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
-
-	hy2 "github.com/sagernet/sing-quic/hysteria2"
 )
 
 func TestPrepareXrayCustomOutboundsPreservesGeckoPacketSizes(t *testing.T) {
@@ -41,15 +40,64 @@ func TestPrepareXrayCustomOutboundsPreservesGeckoPacketSizes(t *testing.T) {
 		t.Fatalf("protobuf Gecko packet sizes = %d..%d, want 640..1400", got.GetMinPacketSize(), got.GetMaxPacketSize())
 	}
 
-	clientOptions := new(hy2.ClientOptions)
-	if err := applyXrayHysteria2Obfs(clientOptions, got); err != nil {
+	obfsOptions, err := parseXrayHysteria2Obfs(got)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if clientOptions.GeckoPassword != "obfs-password" {
-		t.Fatalf("sing-quic Gecko password = %q, want obfs-password", clientOptions.GeckoPassword)
+	if obfsOptions.password != "obfs-password" {
+		t.Fatalf("official Hysteria Gecko password = %q, want obfs-password", obfsOptions.password)
 	}
-	if clientOptions.GeckoMinPacketSize != 640 || clientOptions.GeckoMaxPacketSize != 1400 {
-		t.Fatalf("sing-quic Gecko packet sizes = %d..%d, want 640..1400", clientOptions.GeckoMinPacketSize, clientOptions.GeckoMaxPacketSize)
+	if obfsOptions.minPacketSize != 640 || obfsOptions.maxPacketSize != 1400 {
+		t.Fatalf("official Hysteria Gecko packet sizes = %d..%d, want 640..1400", obfsOptions.minPacketSize, obfsOptions.maxPacketSize)
+	}
+}
+
+func TestOfficialHysteriaCoreConfigPreservesExistingSettings(t *testing.T) {
+	server := "hy.example.com"
+	serverPort := uint32(8443)
+	upMbps := int32(25)
+	downMbps := int32(80)
+	password := "auth-password"
+	obfsType := "gecko"
+	obfsPassword := "obfs-password"
+	minPacketSize := int32(640)
+	maxPacketSize := int32(1400)
+	tlsJSON := `{"enabled":true,"server_name":"sni.example.com","insecure":true}`
+	outbound := &xrayHysteria2Outbound{config: &gen.XrayHysteria2Config{
+		Server:        &server,
+		ServerPort:    &serverPort,
+		UpMbps:        &upMbps,
+		DownMbps:      &downMbps,
+		Password:      &password,
+		ObfsType:      &obfsType,
+		ObfsPassword:  &obfsPassword,
+		TlsJson:       &tlsJSON,
+		MinPacketSize: &minPacketSize,
+		MaxPacketSize: &maxPacketSize,
+	}}
+
+	config, err := outbound.clientConfig(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != password {
+		t.Fatalf("auth = %q, want %q", config.Auth, password)
+	}
+	if config.BandwidthConfig.MaxTx != 25*megabitToBytes || config.BandwidthConfig.MaxRx != 80*megabitToBytes {
+		t.Fatalf("bandwidth = %d/%d, want %d/%d", config.BandwidthConfig.MaxTx, config.BandwidthConfig.MaxRx, 25*megabitToBytes, 80*megabitToBytes)
+	}
+	if config.TLSConfig.ServerName != "sni.example.com" || !config.TLSConfig.InsecureSkipVerify {
+		t.Fatalf("TLS settings were not preserved: server_name=%q insecure=%v", config.TLSConfig.ServerName, config.TLSConfig.InsecureSkipVerify)
+	}
+	factory, ok := config.ConnFactory.(*xrayHysteria2ConnFactory)
+	if !ok {
+		t.Fatalf("ConnFactory type = %T", config.ConnFactory)
+	}
+	if factory.serverAddress.String() != "hy.example.com:8443" {
+		t.Fatalf("server address = %q", factory.serverAddress.String())
+	}
+	if factory.obfs.typeName != "gecko" || factory.obfs.password != obfsPassword || factory.obfs.minPacketSize != 640 || factory.obfs.maxPacketSize != 1400 {
+		t.Fatalf("Gecko settings were not preserved: %+v", factory.obfs)
 	}
 }
 
