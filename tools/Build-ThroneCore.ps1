@@ -352,6 +352,12 @@ $env:PATH = "$(Split-Path -Parent $protoc);$env:PATH"
 Push-Location $genDirectory
 try {
     Invoke-Native $protoc -I . --go_out=. --protorpc_out=. libcore.proto
+    # Custom Core branches carry a second schema. Regenerate it in the staged
+    # source so an older local .pb.go cannot hide newly added fields.
+    if (Test-Path -LiteralPath 'xray_hysteria2.proto') {
+        Write-Step 'Generating Xray Hysteria2 protobuf'
+        Invoke-Native $protoc -I . --go_out=. xray_hysteria2.proto
+    }
 } finally {
     Pop-Location
 }
