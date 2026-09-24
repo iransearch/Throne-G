@@ -31,6 +31,7 @@ import (
 	"github.com/google/shlex"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
@@ -57,6 +58,7 @@ var xrayFullGates []*xray.Gate
 // Reached only from Start/Stop, i.e. always under lifecycleMu.
 var extraProcess *process.Process
 var needUnsetDNS bool
+var stopEgressForwardingWatch func()
 var debug bool
 
 var errInstanceNotRunning = errors.New("Instance is not running")
@@ -339,7 +341,9 @@ func prepareTestEnv(current bool, needXray bool, xrayConfig string, xrayFullConf
 	}
 	cleanups = append(cleanups, func() { closeXrayInstances(fullXray) })
 
-	box, cancel, err := boxmain.Create([]byte(coreConfig), boxCtx.publish)
+	box, cancel, err := boxmain.Create([]byte(coreConfig), boxCtx.publish, func(options *option.Options) {
+		applyAutoRedirectMark(options, autoRedirectMark.Load())
+	})
 	if err != nil {
 		unwind()
 		return nil, err
@@ -526,6 +530,10 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 		needUnsetDNS = true
 	}
 
+	if in.GetTunIpv4Cidr() != "" {
+		stopEgressForwardingWatch = watchEgressForwarding(box.Network())
+	}
+
 	return
 }
 
@@ -546,6 +554,11 @@ func (s *server) Stop(ctx context.Context, in *gen.EmptyReq) (out *gen.ErrorResp
 	box, cancel := currentInstance()
 	if box == nil {
 		return
+	}
+
+	if stopEgressForwardingWatch != nil {
+		stopEgressForwardingWatch()
+		stopEgressForwardingWatch = nil
 	}
 
 	if needUnsetDNS {
@@ -855,7 +868,7 @@ func (s *server) IsPrivileged(ctx context.Context, _ *gen.EmptyReq) (*gen.IsPriv
 		}, nil
 	}
 
-	return &gen.IsPrivilegedResponse{HasPrivilege: To(os.Geteuid() == 0)}, nil
+	return &gen.IsPrivilegedResponse{HasPrivilege: To(os.Geteuid() == 0 || hasTunCapabilities())}, nil
 }
 
 func (s *server) SpeedTest(ctx context.Context, in *gen.SpeedTestRequest) (*gen.SpeedTestResponse, error) {
