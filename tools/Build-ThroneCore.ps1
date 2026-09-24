@@ -392,7 +392,20 @@ if (-not $ModernOnly) {
 
 Write-Step 'Downloading the modern Core runtime companion'
 $cronet = Join-Path $OutputDirectory 'windows-amd64\libcronet.dll'
-Download-File 'https://github.com/SagerNet/cronet-go/releases/latest/download/libcronet-windows-amd64.dll' $cronet
+Set-GoEnvironment -GoExecutable $modernGo -CacheSuffix 'host-tools'
+Push-Location $serverDirectory
+try {
+    $cronetModule = 'github.com/sagernet/cronet-go/lib/windows_amd64'
+    Invoke-Go $modernGo mod download $cronetModule
+    $cronetDirectory = (Invoke-Go $modernGo list -mod=mod -m -f '{{.Dir}}' $cronetModule | Out-String).Trim()
+    $cronetSource = Join-Path $cronetDirectory 'libcronet.dll'
+    if (-not (Test-Path -LiteralPath $cronetSource)) {
+        throw "Matching Cronet DLL was not found: $cronetSource"
+    }
+    Copy-Item -LiteralPath $cronetSource -Destination $cronet -Force
+} finally {
+    Pop-Location
+}
 
 Write-Step 'Writing checksums and build information'
 $checksumLines = New-Object Collections.Generic.List[string]
