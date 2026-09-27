@@ -42,8 +42,10 @@ func init() {
 type xrayHysteria2Outbound struct {
 	config *gen.XrayHysteria2Config
 
-	clientMu sync.Mutex
-	client   hyclient.Client
+	clientMu     sync.Mutex
+	client       hyclient.Client
+	clientCancel context.CancelFunc
+	closed       bool
 }
 
 var _ proxy.Outbound = (*xrayHysteria2Outbound)(nil)
@@ -57,9 +59,20 @@ func newXrayHysteria2Outbound(_ context.Context, config *gen.XrayHysteria2Config
 
 func (h *xrayHysteria2Outbound) Close() error {
 	h.clientMu.Lock()
+	if h.closed {
+		h.clientMu.Unlock()
+		return nil
+	}
+	h.closed = true
 	client := h.client
+	cancel := h.clientCancel
 	h.client = nil
 	h.clientMu.Unlock()
+	// Interrupt transport/handshake before waiting for the Hysteria client's
+	// internal mutex. Close must not wait for an unreachable server's timeout.
+	if cancel != nil {
+		cancel()
+	}
 	if client != nil {
 		return client.Close()
 	}
@@ -69,23 +82,35 @@ func (h *xrayHysteria2Outbound) Close() error {
 func (h *xrayHysteria2Outbound) getClient(ctx context.Context, dialer internet.Dialer) (hyclient.Client, error) {
 	h.clientMu.Lock()
 	defer h.clientMu.Unlock()
+	if h.closed {
+		return nil, stdnet.ErrClosed
+	}
 	if h.client != nil {
 		return h.client, nil
 	}
 
-	lifetimeCtx := context.WithoutCancel(ctx)
+	// Preserve routing values without binding the shared client to one stream.
+	// Its lifetime ends when this outbound is closed (including test cleanup).
+	lifetimeCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	configFunc := func() (*hyclient.Config, error) {
 		return h.clientConfig(lifetimeCtx, dialer)
 	}
-	client, err := hyclient.NewReconnectableClient(configFunc, nil, false)
+	// Lazy creation does no network I/O under clientMu. The first TCP/UDP call
+	// connects after releasing it, so Close can always cancel the transport.
+	client, err := hyclient.NewReconnectableClient(configFunc, nil, true)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("hysteria2 xray: create Hysteria core v2.12.3 client: %w", err)
 	}
 	h.client = client
+	h.clientCancel = cancel
 	return client, nil
 }
 
 func (h *xrayHysteria2Outbound) clientConfig(ctx context.Context, dialer internet.Dialer) (*hyclient.Config, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var tlsOptions option.OutboundTLSOptions
 	if err := json.Unmarshal([]byte(h.config.GetTlsJson()), &tlsOptions); err != nil {
 		return nil, fmt.Errorf("hysteria2 xray: invalid TLS options: %w", err)
@@ -197,6 +222,9 @@ type xrayHysteria2ConnFactory struct {
 }
 
 func (f *xrayHysteria2ConnFactory) New(stdnet.Addr) (stdnet.PacketConn, error) {
+	if err := f.ctx.Err(); err != nil {
+		return nil, err
+	}
 	dial := func(destination M.Socksaddr) (stdnet.Conn, error) {
 		target := singSocksaddrToXray(destination, xnet.Network_UDP)
 		ctx := f.ctx
@@ -220,6 +248,13 @@ func (f *xrayHysteria2ConnFactory) New(stdnet.Addr) (stdnet.PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := f.ctx.Err(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	// Hysteria's auth request does not accept our context. Closing its UDP
+	// transport on outbound cancellation also interrupts QUIC/auth reads.
+	conn = newXrayHysteria2LifetimeConn(f.ctx, conn)
 	packetConn := &xrayHysteria2ConnectedPacketConn{
 		Conn:       conn,
 		remoteAddr: xrayHysteria2ServerAddr{address: f.serverAddress},
@@ -230,6 +265,22 @@ func (f *xrayHysteria2ConnFactory) New(stdnet.Addr) (stdnet.PacketConn, error) {
 		return nil, fmt.Errorf("hysteria2 xray: configure obfs: %w", err)
 	}
 	return wrapped, nil
+}
+
+type xrayHysteria2LifetimeConn struct {
+	stdnet.Conn
+	stopCancel func() bool
+}
+
+func newXrayHysteria2LifetimeConn(ctx context.Context, conn stdnet.Conn) *xrayHysteria2LifetimeConn {
+	c := &xrayHysteria2LifetimeConn{Conn: conn}
+	c.stopCancel = context.AfterFunc(ctx, func() { _ = conn.Close() })
+	return c
+}
+
+func (c *xrayHysteria2LifetimeConn) Close() error {
+	c.stopCancel()
+	return c.Conn.Close()
 }
 
 type xrayHysteria2ServerAddr struct {
@@ -377,4 +428,3 @@ func singSocksaddrToXray(destination M.Socksaddr, network xnet.Network) xnet.Des
 	}
 	return xnet.Destination{Network: network, Address: address, Port: xnet.Port(destination.Port)}
 }
-

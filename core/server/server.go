@@ -609,6 +609,9 @@ func (s *server) CheckConfig(ctx context.Context, in *gen.LoadConfigReq) (out *g
 }
 
 func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, error) {
+	// Capture before preparation: StopTest must also cancel a test that is
+	// still building its environment, even though it rearms the next context.
+	testCtx := test_utils.TestContext()
 	_ = boxdns.Start()
 
 	env, err := prepareTestEnv(in.GetTestCurrent(), in.GetNeedXray(), in.GetXrayConfig(),
@@ -624,12 +627,17 @@ func (s *server) Test(ctx context.Context, in *gen.TestReq) (*gen.TestResp, erro
 		}
 		return nil, err
 	}
-	defer env.close()
+	defer func() {
+		netdiag.Emit("test-cleanup-begin", netdiag.Box(env.box.Context()), "")
+		started := time.Now()
+		env.close()
+		netdiag.Emit("test-cleanup-end", netdiag.Box(env.box.Context()), fmt.Sprintf("elapsedMs=%d", time.Since(started).Milliseconds()))
+		netdiag.Emit("test-return", netdiag.Box(env.box.Context()), "")
+	}()
 	netdiag.Emit("test-environment", netdiag.Box(env.box.Context()), fmt.Sprintf("current=%t config=%s", in.GetTestCurrent(), netdiag.Hash(in.GetConfig())))
-	defer netdiag.Emit("test-return", netdiag.Box(env.box.Context()), "")
-
-	// Held, not re-read: StopTest rearms a fresh context, uncancelled.
-	testCtx := test_utils.TestContext()
+	if err := testCtx.Err(); err != nil {
+		return nil, err
+	}
 
 	// A muxed config needs a warm connection; the live instance already is one.
 	twice := !in.GetTestCurrent()
