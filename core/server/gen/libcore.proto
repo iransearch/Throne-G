@@ -413,3 +413,10 @@ message InstallDashboardRequest {
   optional string archive_path = 1 [default = ""];
   optional string target_dir = 2 [default = ""];
 }
+
+// Internal Xray app configuration, not an RPC request. Retain the original
+// burst observer options verbatim while deferring its scheduler until the
+// owning sing-box instance has finished starting DNS, egress and inbounds.
+message XrayDeferredObservatoryConfig {
+  required bytes burst_config = 1;
+}

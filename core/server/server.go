@@ -445,6 +445,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 	// Filled in below, once boxmain.Create has built the box these sidecars resolve through.
 	var boxCtx boxContextHolder
 	prepareXray := xrayPreparer(in.GetXrayOutboundDnsStrategy(), boxCtx.get)
+	var eagerXray *core.Instance
 
 	if *in.NeedXray {
 		if in.GetXrayLazyStart() {
@@ -456,7 +457,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 			}
 			setXray(nil, gate)
 		} else {
-			instance, e := xray.CreateXrayInstance(*in.XrayConfig)
+			instance, e := xray.CreateXrayInstanceWithDeferredObservatory(*in.XrayConfig)
 			if e != nil {
 				err = e
 				return
@@ -472,6 +473,7 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 				return
 			}
 			setXray(instance, nil)
+			eagerXray = instance
 		}
 	}
 
@@ -487,6 +489,15 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 	}
 
 	box, cancel, err := boxmain.Create([]byte(*in.CoreConfig), boxCtx.publish)
+	// A published context is not readiness. Release the shared main/AI Pool
+	// scheduler only after DNS, egress and inbounds have started successfully.
+	// Xray listeners stay available earlier for remote rule-set downloads.
+	if err == nil && eagerXray != nil {
+		netdiag.Emit("pool-probes-ready", netdiag.Box(box.Context()), "")
+		if err = xray.StartDeferredObservatory(eagerXray); err != nil {
+			box.CloseWithTimeout(cancel, 2*time.Second, log.Println, true)
+		}
+	}
 	if err != nil {
 		if extraProcess != nil {
 			extraProcess.Stop()

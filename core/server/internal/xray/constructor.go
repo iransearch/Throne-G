@@ -39,10 +39,24 @@ func hasThroneHysteria2Outbound(config string) bool {
 }
 
 func CreateXrayInstance(config string) (*core.Instance, error) {
+	return createXrayInstance(config, false)
+}
+
+// The caller must release Pool probes with StartDeferredObservatory only after
+// its sing-box instance has started successfully. Xray's listeners/outbounds
+// remain available during startup for remote rule-set downloads.
+func CreateXrayInstanceWithDeferredObservatory(config string) (*core.Instance, error) {
+	return createXrayInstance(config, true)
+}
+
+func createXrayInstance(config string, deferObservatory bool) (*core.Instance, error) {
 	hasCustomHysteria2 := hasThroneHysteria2Outbound(config)
 	built, err := buildXrayConfig(config)
 	if err != nil {
 		return nil, err
+	}
+	if deferObservatory {
+		deferBurstObservatory(built)
 	}
 
 	server, err := core.New(built)
