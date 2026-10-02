@@ -1,6 +1,7 @@
 package boxbox
 
 import (
+	"ThroneCore/internal/autoselector"
 	"ThroneCore/internal/netdiag"
 	"context"
 	"fmt"
@@ -138,6 +139,9 @@ func New(options Options) (*Box, error) {
 	}
 	// Also cover contexts made by upstream box.Context (the normal RPC path).
 	observeHysteriaRegistry(outboundRegistry)
+	if registry, ok := outboundRegistry.(*outbound.Registry); ok {
+		autoselector.RegisterAutoSelector(registry)
+	}
 	if dnsTransportRegistry == nil {
 		return nil, E.New("missing DNS transport registry in context")
 	}

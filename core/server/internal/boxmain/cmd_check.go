@@ -1,6 +1,7 @@
 package boxmain
 
 import (
+	"ThroneCore/internal/autoselector"
 	"context"
 	"github.com/sagernet/sing-box/include"
 
@@ -9,7 +10,9 @@ import (
 
 func Check(content []byte) error {
 	ctx := context.Background()
-	ctx = boxbox.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
+	registry := include.OutboundRegistry()
+	autoselector.RegisterAutoSelector(registry)
+	ctx = boxbox.Context(ctx, include.InboundRegistry(), registry, include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
 	options, err := parseConfig(ctx, content)
 	if err != nil {
 		return err

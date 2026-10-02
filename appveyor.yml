@@ -1,8 +1,9 @@
-version: 1.2.4-gecko-xray-split-{build}
+version: 1.3.0-beta.1-round-robin-{build}
 
 branches:
   only:
     - agent/protorpc-irspeedy-parent-fix
+    - update/fc668b60-core-only-1.3.0-beta.1
 
 skip_tags: true
 clone_depth: 1
@@ -19,7 +20,7 @@ environment:
       OPENSSL_ARCH: x64
       VCVARS: x64
       REQUIRE_CRONET: 1
-      ARTIFACT_NAME: Throne-1.2.4-gecko-xray-windows64.zip
+      ARTIFACT_NAME: Throne-1.3.0-beta.1-round-robin-windows64.zip
     - TARGET_NAME: Windows 7 x64
       TARGET_KIND: legacy
       GOARCH_TARGET: amd64
@@ -29,7 +30,7 @@ environment:
       OPENSSL_ARCH: x64
       VCVARS: x64
       REQUIRE_CRONET: 0
-      ARTIFACT_NAME: Throne-1.2.4-gecko-xray-windowslegacy64.zip
+      ARTIFACT_NAME: Throne-1.3.0-beta.1-round-robin-windowslegacy64.zip
     - TARGET_NAME: Windows 7 x86
       TARGET_KIND: legacy
       GOARCH_TARGET: 386
@@ -39,7 +40,7 @@ environment:
       OPENSSL_ARCH: x86
       VCVARS: x86
       REQUIRE_CRONET: 0
-      ARTIFACT_NAME: Throne-1.2.4-gecko-xray-windows32.zip
+      ARTIFACT_NAME: Throne-1.3.0-beta.1-round-robin-windows32.zip
 
 build_script:
   - ps: |
@@ -128,35 +129,14 @@ build_script:
         Assert-NativeSuccess 'legacy Go version'
       }
 
-      Write-Host 'Preparing pinned Gecko dependencies...'
-      Set-Location $root
-      New-Item -ItemType Directory -Force '_deps' | Out-Null
-      & git clone --quiet --no-checkout https://github.com/iransearch/sing-box.git _deps/sing-box
-      Assert-NativeSuccess 'clone sing-box'
-      & git -C _deps/sing-box checkout --quiet fd09ece82e44172cc4d511384379e88ff4e6b845
-      Assert-NativeSuccess 'checkout sing-box'
-      $singBoxHead = (& git -C _deps/sing-box rev-parse HEAD).Trim()
-      if ($singBoxHead -ne 'fd09ece82e44172cc4d511384379e88ff4e6b845') { throw "Unexpected sing-box HEAD: $singBoxHead" }
-
-      & git clone --quiet --no-checkout https://github.com/iransearch/sing-quic.git _deps/sing-quic
-      Assert-NativeSuccess 'clone sing-quic'
-      & git -C _deps/sing-quic checkout --quiet 3adc08d3a6bfc8ad1dc8296e4a8647861ec83ed9
-      Assert-NativeSuccess 'checkout sing-quic'
-      $singQuicHead = (& git -C _deps/sing-quic rev-parse HEAD).Trim()
-      if ($singQuicHead -ne '3adc08d3a6bfc8ad1dc8296e4a8647861ec83ed9') { throw "Unexpected sing-quic HEAD: $singQuicHead" }
-
-      Write-Host 'Applying local module replacements...'
+      # The current Core imports the newer APIs pinned in go.mod. Do not replace
+      # them with the obsolete Gecko checkout: it lacks certificate/httpclient/
+      # netns/trafficcontrol packages and cannot compile this branch.
+      Write-Host 'Downloading pinned Core dependencies from go.mod...'
       $env:GOROOT = $modernRoot
       Push-Location (Join-Path $root 'core\server')
-      & $modernGo mod edit '-replace=github.com/sagernet/sing-box=../../_deps/sing-box'
-      Assert-NativeSuccess 'replace sing-box'
-      & $modernGo mod edit '-replace=github.com/sagernet/sing-quic=../../_deps/sing-quic'
-      Assert-NativeSuccess 'replace sing-quic'
-      $ErrorActionPreference = 'Continue'
-      & $modernGo mod tidy
-      $goModTidyExit = $LASTEXITCODE
-      $ErrorActionPreference = 'Stop'
-      if ($goModTidyExit -ne 0) { throw "go mod tidy failed with exit code $goModTidyExit" }
+      & $modernGo mod download
+      Assert-NativeSuccess 'download pinned Core dependencies'
       Pop-Location
 
       $dest = Join-Path $root "deployment\$env:DEST_SUFFIX"
@@ -226,7 +206,7 @@ build_script:
       7z a -tzip -mx=7 "%ARTIFACT_NAME%" ".\deployment\%DEST_SUFFIX%\*" || exit /b 1
 
 artifacts:
-  - path: Throne-1.2.4-gecko-xray-*.zip
+  - path: Throne-1.3.0-beta.1-round-robin-*.zip
 
 test: off
 deploy: off

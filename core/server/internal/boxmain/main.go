@@ -1,6 +1,7 @@
 package boxmain
 
 import (
+	"ThroneCore/internal/autoselector"
 	"context"
 	"os"
 	"os/user"
@@ -78,6 +79,8 @@ func newBoxContext() context.Context {
 		ctx = filemanager.WithDefault(ctx, "", "", ownerUID, ownerGID)
 	}
 	ctx = service.ContextWith(ctx, deprecated.NewStderrManager(log.StdLogger()))
-	ctx = box.Context(ctx, include.InboundRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
+	registry := include.OutboundRegistry()
+	autoselector.RegisterAutoSelector(registry)
+	ctx = box.Context(ctx, include.InboundRegistry(), registry, include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
 	return ctx
 }
