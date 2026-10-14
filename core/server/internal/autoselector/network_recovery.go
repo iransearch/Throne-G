@@ -11,15 +11,21 @@ func (s *AutoSelector) SetMemberRecovery(recover func(string) bool) {
 }
 
 func (s *AutoSelector) beginNetworkRecoveryLocked() {
+	keepProof := !s.recoveryReturnedAt.IsZero() && time.Now().Before(s.recoveryUntil)
 	s.recoveryEpoch++
 	s.recoveredMembers = make(map[string]uint64)
-	s.recoveryUntil = time.Time{} // Arm only after the physical route returns.
+	if !keepProof {
+		s.recoveryVerifiedMembers = make(map[string]bool)
+		s.recoveryUntil = time.Time{} // Arm only after the physical route returns.
+		s.recoveryFailureSince = rollbackSince(time.Now(), time.Time{})
+	}
 }
 
 // A network return buys one repair per failing member. Successful probes never
 // reset their transports, and unreachable servers do not cause a reset loop.
 func (s *AutoSelector) recoverFailedResults(results []probeResult) []probeResult {
-	if s.ctx.Err() != nil || s.networkInterfaceDown() || (s.pause != nil && s.pause.IsPaused()) {
+	_, epochOfProbe, allowed := s.networkProbeState()
+	if !allowed || len(results) == 0 || results[0].epoch != epochOfProbe {
 		return results
 	}
 	s.access.Lock()
@@ -75,7 +81,7 @@ func (s *AutoSelector) recoverFailedResults(results []probeResult) []probeResult
 					// This is a new transport, verified externally. Failure
 					// samples from its predecessor cannot quarantine it for
 					// the five-hour window. Other members/history stay intact.
-					health.rollbackFailuresSince(time.Time{})
+					health.rollbackFailuresSince(s.recoveryFailureSince)
 				}
 			}
 			s.access.Unlock()

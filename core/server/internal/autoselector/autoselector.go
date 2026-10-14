@@ -154,24 +154,33 @@ type AutoSelector struct {
 	selectedTCP common.TypedValue[adapter.Outbound]
 	selectedUDP common.TypedValue[adapter.Outbound]
 
-	pinnedTag        string
-	suspended        bool
-	suspendedSince   time.Time
-	optimisticIdx    int
-	roundsCompleted  int
-	lastRoundAt      time.Time
-	nextRoundAt      time.Time
-	probesInFlight   int
-	lastSwitchAt     time.Time
-	lastSwitchReason string
-	started          bool
-	nextRotateAt     time.Time
-	lastKickAt       time.Time
-	recentDialFails  map[string]time.Time
-	recoverMember    func(string) bool
-	recoveryEpoch    uint64
-	recoveredMembers map[string]uint64
-	recoveryUntil    time.Time
+	pinnedTag               string
+	suspended               bool
+	suspendedSince          time.Time
+	optimisticIdx           int
+	roundsCompleted         int
+	lastRoundAt             time.Time
+	nextRoundAt             time.Time
+	probesInFlight          int
+	lastSwitchAt            time.Time
+	lastSwitchReason        string
+	started                 bool
+	nextRotateAt            time.Time
+	lastKickAt              time.Time
+	recentDialFails         map[string]time.Time
+	recoverMember           func(string) bool
+	recoveryEpoch           uint64
+	recoveredMembers        map[string]uint64
+	recoveryUntil           time.Time
+	recoveryFailureSince    time.Time
+	recoveryReturnedAt      time.Time
+	externalNetworkOffline  bool
+	probeContext            context.Context
+	probeCancel             context.CancelFunc
+	probeEpoch              uint64
+	roundAccess             sync.Mutex
+	checkPending            bool
+	recoveryVerifiedMembers map[string]bool
 
 	connAccess    sync.Mutex
 	connOK        bool
@@ -567,6 +576,7 @@ func (s *AutoSelector) InterfaceUpdated(_ context.Context) {
 		return
 	}
 	s.beginNetworkRecoveryLocked()
+	s.restartNetworkProbesLocked()
 	s.lastKickAt = time.Now()
 	s.access.Unlock()
 	select {
@@ -599,10 +609,27 @@ func (s *AutoSelector) watchLoop() {
 		if detour == nil {
 			continue
 		}
-		value, err := s.probe(detour)
+		probeCtx, epoch, allowed := s.networkProbeState()
+		if !allowed {
+			continue
+		}
+		value, err := s.probeWithContext(probeCtx, detour)
 		now := time.Now()
+		s.access.Lock()
+		stale := epoch != s.probeEpoch || s.externalNetworkOffline || probeCtx.Err() != nil
+		s.access.Unlock()
+		if stale {
+			continue
+		}
 		if value != rttFailed {
+			if s.recordRecoverySuccess(probeResult{tag: detour.Tag(), value: value, at: now, epoch: epoch}) {
+				continue
+			}
 			s.access.Lock()
+			if epoch != s.probeEpoch || s.externalNetworkOffline || probeCtx.Err() != nil {
+				s.access.Unlock()
+				continue
+			}
 			if health, loaded := s.members[detour.Tag()]; loaded {
 				health.put(value, now)
 				health.lastDialErr = ""
@@ -620,6 +647,10 @@ func (s *AutoSelector) watchLoop() {
 		// buy is an immediate round over the active tier, so the answer comes in
 		// seconds rather than at the next tick.
 		s.access.Lock()
+		if epoch != s.probeEpoch || s.externalNetworkOffline || probeCtx.Err() != nil {
+			s.access.Unlock()
+			continue
+		}
 		if health, loaded := s.members[detour.Tag()]; loaded {
 			health.put(rttFailed, now)
 			if err != nil {
@@ -679,9 +710,19 @@ type probeResult struct {
 	value time.Duration
 	err   error
 	at    time.Time
+	epoch uint64
 }
 
 func (s *AutoSelector) runRound(urgent bool) {
+	s.roundAccess.Lock()
+	defer s.roundAccess.Unlock()
+	probeCtx, epoch, allowed := s.networkProbeState()
+	s.access.Lock()
+	blocked := s.checkPending || s.externalNetworkOffline
+	s.access.Unlock()
+	if blocked {
+		return
+	}
 	if s.ctx.Err() != nil || (s.pause != nil && s.pause.IsPaused()) {
 		return
 	}
@@ -689,12 +730,15 @@ func (s *AutoSelector) runRound(urgent bool) {
 		s.enterSuspended(time.Now(), time.Time{})
 		return
 	}
+	if !allowed {
+		return
+	}
 	batch := s.roundBatch(urgent)
 	if len(batch) == 0 {
 		return
 	}
 	startedAt := time.Now()
-	results := s.probeBatch(batch, urgent)
+	results := s.probeBatchOnNetwork(batch, urgent, probeCtx, epoch)
 	if len(results) == 0 {
 		return
 	}
@@ -703,6 +747,17 @@ func (s *AutoSelector) runRound(urgent bool) {
 }
 
 func (s *AutoSelector) probeBatch(batch []string, urgent bool) []probeResult {
+	probeCtx, epoch, allowed := s.networkProbeState()
+	if !allowed {
+		return nil
+	}
+	return s.probeBatchOnNetwork(batch, urgent, probeCtx, epoch)
+}
+
+func (s *AutoSelector) probeBatchOnNetwork(batch []string, urgent bool, probeCtx context.Context, epoch uint64) []probeResult {
+	if urgent {
+		return s.probeUrgentBatch(batch, probeCtx, epoch)
+	}
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
@@ -726,9 +781,11 @@ func (s *AutoSelector) probeBatch(batch []string, urgent bool) []probeResult {
 				case <-time.After(delay):
 				case <-s.close:
 					return
+				case <-probeCtx.Done():
+					return
 				}
 				// The round began before the device or network paused; these members wait for the next one.
-				if s.pause.IsPaused() {
+				if s.pause != nil && s.pause.IsPaused() {
 					return
 				}
 			}
@@ -736,24 +793,33 @@ func (s *AutoSelector) probeBatch(batch []string, urgent bool) []probeResult {
 			case limiter <- struct{}{}:
 			case <-s.close:
 				return
+			case <-probeCtx.Done():
+				return
 			}
 			defer func() { <-limiter }()
 			// A queued member must not start after a pause/outage that arrived
 			// while earlier probes occupied the concurrency slots.
-			if s.ctx.Err() != nil || s.networkInterfaceDown() || (s.pause != nil && s.pause.IsPaused()) {
+			if probeCtx.Err() != nil || s.networkInterfaceDown() || (s.pause != nil && s.pause.IsPaused()) {
 				return
 			}
 
 			s.access.Lock()
 			s.probesInFlight++
 			s.access.Unlock()
-			value, err := s.probe(detour)
+			value, err := s.probeWithContext(probeCtx, detour)
 			s.access.Lock()
 			s.probesInFlight--
 			s.access.Unlock()
 
+			result := probeResult{tag: tag, value: value, err: err, at: time.Now(), epoch: epoch}
+			if probeCtx.Err() != nil {
+				return
+			}
+			if value != rttFailed {
+				s.recordRecoverySuccess(result)
+			}
 			mu.Lock()
-			results = append(results, probeResult{tag: tag, value: value, err: err, at: time.Now()})
+			results = append(results, result)
 			mu.Unlock()
 		}(tag, detour)
 	}
@@ -762,7 +828,15 @@ func (s *AutoSelector) probeBatch(batch []string, urgent bool) []probeResult {
 }
 
 func (s *AutoSelector) probe(detour adapter.Outbound) (time.Duration, error) {
-	ctx, cancel := context.WithTimeout(s.ctx, s.probeTimeout)
+	ctx, _, allowed := s.networkProbeState()
+	if !allowed {
+		return rttFailed, context.Canceled
+	}
+	return s.probeWithContext(ctx, detour)
+}
+
+func (s *AutoSelector) probeWithContext(parent context.Context, detour adapter.Outbound) (time.Duration, error) {
+	ctx, cancel := context.WithTimeout(parent, s.probeTimeout)
 	defer cancel()
 	delay, err := urltest.URLTest(ctx, s.link, detour)
 	if err != nil {
@@ -775,6 +849,15 @@ func (s *AutoSelector) probe(detour adapter.Outbound) (time.Duration, error) {
 // local network, then either records or discards them. Successes always commit:
 // one working member proves the network is up.
 func (s *AutoSelector) commitRound(results []probeResult, startedAt time.Time) {
+	if len(results) == 0 {
+		return
+	}
+	s.access.Lock()
+	stale := s.externalNetworkOffline || results[0].epoch != s.probeEpoch
+	s.access.Unlock()
+	if stale {
+		return
+	}
 	if s.ctx.Err() != nil || (s.pause != nil && s.pause.IsPaused()) {
 		return // In-flight results during a local pause say nothing about members.
 	}
@@ -797,12 +880,19 @@ func (s *AutoSelector) commitRound(results []probeResult, startedAt time.Time) {
 	// rule below stays silent while good members collect failures.
 	brokeTogether := 0
 	s.access.Lock()
+	if s.externalNetworkOffline || results[0].epoch != s.probeEpoch {
+		s.access.Unlock()
+		return
+	}
 	for _, result := range results {
 		if result.value != rttFailed {
 			continue
 		}
 		health, loaded := s.members[result.tag]
 		if !loaded {
+			continue
+		}
+		if !health.lastProbe.Before(result.at) {
 			continue
 		}
 		if stats := health.stats(result.at); stats.All > 0 && stats.Fail == 0 {
@@ -834,14 +924,21 @@ func (s *AutoSelector) commitRound(results []probeResult, startedAt time.Time) {
 
 	now := time.Now()
 	if outage {
-		s.enterSuspended(now, startedAt)
+		s.enterSuspended(now, startedAt, results[0].epoch)
 		return
 	}
 
 	s.access.Lock()
+	if s.externalNetworkOffline || results[0].epoch != s.probeEpoch {
+		s.access.Unlock()
+		return
+	}
 	for _, result := range results {
 		health, loaded := s.members[result.tag]
 		if !loaded {
+			continue
+		}
+		if !health.lastProbe.Before(result.at) {
 			continue
 		}
 		if result.err != nil && isLocalNetworkError(result.err) {
@@ -933,8 +1030,12 @@ func (s *AutoSelector) isSuspended() bool {
 // fixed rollback window covers only the tail of a round and would leave the
 // earlier failures — recorded while the network was already dying — in place.
 // The window is still the floor, since it also has to cover the dial path.
-func (s *AutoSelector) enterSuspended(now time.Time, since time.Time) {
+func (s *AutoSelector) enterSuspended(now time.Time, since time.Time, expectedEpoch ...uint64) {
 	s.access.Lock()
+	if len(expectedEpoch) > 0 && expectedEpoch[0] != s.probeEpoch {
+		s.access.Unlock()
+		return
+	}
 	if s.suspended {
 		s.access.Unlock()
 		return
@@ -1039,6 +1140,8 @@ func (s *AutoSelector) suspendedFor(now time.Time) time.Duration {
 // optimisticRound commits only successes: a failure while the link is believed down says
 // nothing about the member and would bury a healthy pool.
 func (s *AutoSelector) optimisticRound() {
+	s.roundAccess.Lock()
+	defer s.roundAccess.Unlock()
 	batch := s.optimisticBatch()
 	if len(batch) == 0 {
 		return
@@ -1265,6 +1368,9 @@ func (s *AutoSelector) pick(network string, tried map[string]bool) adapter.Outbo
 	s.access.Lock()
 	defer s.access.Unlock()
 	now := time.Now()
+	if s.externalNetworkOffline {
+		return nil
+	}
 
 	// Balancing and a pinned member are contradictory instructions; the explicit
 	// one wins. Spreading traffic resumes by itself once the pin is released or
@@ -1559,6 +1665,8 @@ func (s *AutoSelector) NewPacketConnection(ctx context.Context, conn N.PacketCon
 // URLTest forces a full sweep of every member and reports the delays, satisfying
 // adapter.URLTestGroup so the clash API can drive it.
 func (s *AutoSelector) URLTest(ctx context.Context) (map[string]uint16, error) {
+	s.roundAccess.Lock()
+	defer s.roundAccess.Unlock()
 	startedAt := time.Now()
 	results := s.probeBatch(s.tags, true)
 	s.commitRound(results, startedAt)
@@ -1582,11 +1690,7 @@ func (s *AutoSelector) PerformUpdateCheck() {
 }
 
 func (s *AutoSelector) CheckOutbounds() {
-	go func() {
-		startedAt := time.Now()
-		results := s.probeBatch(s.tags, true)
-		s.commitRound(results, startedAt)
-	}()
+	s.queueImmediateCheck()
 }
 
 func (s *AutoSelector) Status() AutoSelectorStatus {

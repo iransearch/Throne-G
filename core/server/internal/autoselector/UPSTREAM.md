@@ -24,6 +24,13 @@ gets one reset in a two-minute window after network return; a fresh external
 probe is required before failure samples from the old client are invalidated.
 The AI selector remains the upstream implementation, with its independent policy.
 
+The explicit main-pool `network-down` / `network-return` actions handle WAN
+outages without an OS adapter event. They cancel old probes and jitter, pause
+while offline, and coalesce an immediate bounded-concurrency sweep. The first
+successful external result is published before slow peers finish. Only failures
+within the detected outage are cleared; earlier server failures remain. Each
+member is cleaned once in the recovery window, and stale results are rejected.
+
 
 Validation:
 - `go test -race ./internal/autoselector ./internal/boxmain ./internal/boxbox`

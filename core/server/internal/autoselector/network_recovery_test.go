@@ -134,12 +134,12 @@ func TestNetworkReturnRepairsOnlyFailedMembersAndRequiresProof(t *testing.T) {
 	}
 	s.pause.NetworkWake()
 	s.InterfaceUpdated(context.Background())
-	s.recoverFailedResults([]probeResult{{tag: "c", value: rttFailed, err: syscall.ENETDOWN}})
+	s.recoverFailedResults([]probeResult{{tag: "c", value: rttFailed, err: syscall.ENETDOWN, epoch: s.probeEpoch}})
 	if counts["c"] != 1 {
 		t.Fatal("local network error reset a remote member")
 	}
 	s.recoveryUntil = time.Now().Add(-time.Second)
-	s.recoverFailedResults([]probeResult{{tag: "c", value: rttFailed, err: errors.New("remote")}})
+	s.recoverFailedResults([]probeResult{{tag: "c", value: rttFailed, err: errors.New("remote"), epoch: s.probeEpoch}})
 	if counts["c"] != 1 {
 		t.Fatal("expired recovery budget reset a remote member")
 	}

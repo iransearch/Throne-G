@@ -117,6 +117,31 @@ func (s *server) AutoSelectorAction(ctx context.Context, in *gen.AutoSelectorAct
 	}
 
 	switch in.GetAction() {
+	case "network-down", "network-return":
+		// This explicit capability belongs to the main round-robin selector.
+		// Validate every target before mutating any; an empty tag is rejected.
+		if in.GetTag() == "" {
+			return &gen.ErrorResp{Error: To("network availability requires a group tag")}, nil
+		}
+		for _, selector := range targets {
+			if _, ok := selector.(interface {
+				NetworkUnavailable()
+				NetworkReturned()
+			}); !ok {
+				return &gen.ErrorResp{Error: To("network recovery is unsupported by group " + selector.Tag())}, nil
+			}
+		}
+		for _, selector := range targets {
+			network := selector.(interface {
+				NetworkUnavailable()
+				NetworkReturned()
+			})
+			if in.GetAction() == "network-down" {
+				network.NetworkUnavailable()
+			} else {
+				network.NetworkReturned()
+			}
+		}
 	case "recheck":
 		for _, selector := range targets {
 			selector.CheckOutbounds()

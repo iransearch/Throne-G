@@ -403,7 +403,9 @@ message QueryAutoSelectorsResponse {
 
 message AutoSelectorActionRequest {
   optional string tag = 1 [default = ""];
-  // recheck = force a full sweep now; select = pin the group to `member`
+  // recheck = force a full sweep now; select = pin the group to `member`.
+  // network-down / network-return = suspend / promptly recover the explicitly
+  // tagged main round-robin selector; an empty tag is not allowed.
   optional string action = 2 [default = ""];
   optional string member = 3 [default = ""];
 }
