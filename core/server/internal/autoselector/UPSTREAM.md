@@ -30,6 +30,10 @@ while offline, and coalesce an immediate bounded-concurrency sweep. The first
 successful external result is published before slow peers finish. Only failures
 within the detected outage are cleared; earlier server failures remain. Each
 member is cleaned once in the recovery window, and stale results are rejected.
+Failed transports are repaired inside their own bounded probe worker, so a
+working replacement does not wait for other dead peers to time out. An initial
+confirmed-return sweep may drain beyond the recovery window; ordinary later
+rechecks cannot extend that window or repeatedly reset failed members.
 
 
 Validation:

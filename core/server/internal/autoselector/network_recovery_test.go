@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -86,8 +87,11 @@ func TestNetworkReturnRepairsOnlyFailedMembersAndRequiresProof(t *testing.T) {
 		s.outbounds[tag] = o
 	}
 	counts := map[string]int{}
+	var countsMu sync.Mutex
 	s.SetMemberRecovery(func(tag string) bool {
+		countsMu.Lock()
 		counts[tag]++
+		countsMu.Unlock()
 		if tag == "b" {
 			s.outbounds[tag].(*recoveryOutbound).broken.Store(false)
 		}

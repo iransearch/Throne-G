@@ -27,7 +27,8 @@ func (s *AutoSelector) NetworkUnavailable() {
 // thread, shares the normal concurrency bound, and bypasses interval/jitter.
 func (s *AutoSelector) NetworkReturned() {
 	s.access.Lock()
-	if s.externalNetworkOffline || s.recoveryReturnedAt.IsZero() {
+	newReturn := s.externalNetworkOffline || s.recoveryReturnedAt.IsZero()
+	if newReturn {
 		since := s.recoveryFailureSince
 		s.beginNetworkRecoveryLocked()
 		if !since.IsZero() {
@@ -41,7 +42,7 @@ func (s *AutoSelector) NetworkReturned() {
 		s.restartNetworkProbesLocked()
 	}
 	s.access.Unlock()
-	s.queueImmediateCheck()
+	s.queueImmediateCheck(newReturn)
 }
 
 func (s *AutoSelector) restartNetworkProbesLocked() {
@@ -65,13 +66,17 @@ func (s *AutoSelector) networkProbeState() (context.Context, uint64, bool) {
 		(s.pause == nil || !s.pause.IsPaused())
 }
 
-func (s *AutoSelector) queueImmediateCheck() {
+func (s *AutoSelector) queueImmediateCheck(confirmedReturn bool) {
 	s.access.Lock()
+	if confirmedReturn && s.checkPending {
+		s.confirmedReturnSweep = true
+	}
 	if s.checkPending || s.externalNetworkOffline || s.ctx.Err() != nil {
 		s.access.Unlock()
 		return
 	}
 	s.checkPending = true
+	s.confirmedReturnSweep = confirmedReturn
 	// Preempt a scheduled round still waiting in its interval jitter.
 	s.restartNetworkProbesLocked()
 	s.access.Unlock()
@@ -92,6 +97,7 @@ func (s *AutoSelector) queueImmediateCheck() {
 				continue
 			}
 			s.checkPending = false
+			s.confirmedReturnSweep = false
 			s.access.Unlock()
 			return
 		}
@@ -104,7 +110,7 @@ func (s *AutoSelector) recordRecoverySuccess(result probeResult) bool {
 	s.access.Lock()
 	defer s.access.Unlock()
 	if s.externalNetworkOffline || result.epoch != s.probeEpoch || s.recoveryReturnedAt.IsZero() ||
-		result.at.Before(s.recoveryReturnedAt) || result.value == rttFailed || result.at.After(s.recoveryUntil) ||
+		result.at.Before(s.recoveryReturnedAt) || result.value == rttFailed || (result.at.After(s.recoveryUntil) && !s.confirmedReturnSweep) ||
 		s.recoveryVerifiedMembers[result.tag] {
 		return false
 	}
@@ -155,7 +161,17 @@ func (s *AutoSelector) probeUrgentBatch(batch []string, ctx context.Context, epo
 					return
 				}
 				result := probeResult{tag: tag, value: value, err: err, at: time.Now(), epoch: epoch}
-				if value != rttFailed {
+				if value == rttFailed {
+					// A stale Hysteria client is repaired as soon as its own probe
+					// fails; it must not wait for every dead peer in the sweep.
+					fresh := s.recoverFailedResults([]probeResult{result})
+					if len(fresh) > 0 {
+						result = fresh[0]
+					}
+					if ctx.Err() != nil {
+						return
+					}
+				} else {
 					s.recordRecoverySuccess(result)
 				}
 				resultMu.Lock()

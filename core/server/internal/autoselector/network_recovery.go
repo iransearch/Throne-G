@@ -33,7 +33,7 @@ func (s *AutoSelector) recoverFailedResults(results []probeResult) []probeResult
 	if epoch != 0 && s.recoveryUntil.IsZero() {
 		s.recoveryUntil = time.Now().Add(2 * time.Minute)
 	}
-	expired := !s.recoveryUntil.IsZero() && time.Now().After(s.recoveryUntil)
+	expired := !s.recoveryUntil.IsZero() && time.Now().After(s.recoveryUntil) && !s.confirmedReturnSweep
 	s.access.Unlock()
 	if epoch == 0 || recover == nil || expired {
 		return results

@@ -180,6 +180,7 @@ type AutoSelector struct {
 	probeEpoch              uint64
 	roundAccess             sync.Mutex
 	checkPending            bool
+	confirmedReturnSweep    bool
 	recoveryVerifiedMembers map[string]bool
 
 	connAccess    sync.Mutex
@@ -1690,7 +1691,7 @@ func (s *AutoSelector) PerformUpdateCheck() {
 }
 
 func (s *AutoSelector) CheckOutbounds() {
-	s.queueImmediateCheck()
+	s.queueImmediateCheck(false)
 }
 
 func (s *AutoSelector) Status() AutoSelectorStatus {

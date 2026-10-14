@@ -64,6 +64,7 @@ type countedRecoveryOutbound struct {
 	address      string
 	active, peak *atomic.Int32
 	dials        atomic.Int32
+	broken       atomic.Bool
 }
 
 func (o *countedRecoveryOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
@@ -72,6 +73,9 @@ func (o *countedRecoveryOutbound) ListenPacket(context.Context, M.Socksaddr) (ne
 
 func (o *countedRecoveryOutbound) DialContext(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
 	o.dials.Add(1)
+	if o.broken.Load() {
+		return nil, errors.New("stale transport")
+	}
 	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", o.address)
 	if err != nil {
 		return nil, err
@@ -156,6 +160,52 @@ func TestWanReturnSweepsImmediatelyPublishesFirstSuccessAndCoalesces(t *testing.
 	if active.Load() != 0 {
 		t.Fatal("cancelled probes retained connections")
 	}
+}
+
+func TestStaleMemberIsRepairedBeforeDeadPeersFinish(t *testing.T) {
+	s := availabilityFixture(t)
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	defer fast.Close()
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+			w.WriteHeader(204)
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	defer close(release)
+	s.link = fast.URL
+	var active, peak, resets atomic.Int32
+	for _, tag := range s.tags {
+		address := slow.Listener.Addr().String()
+		if tag == "a" {
+			address = fast.Listener.Addr().String()
+		}
+		o := &countedRecoveryOutbound{Adapter: outbound.NewAdapter("socks", tag, []string{N.NetworkTCP}, nil), address: address, active: &active, peak: &peak}
+		o.broken.Store(tag == "a")
+		s.outbounds[tag] = o
+	}
+	s.SetMemberRecovery(func(tag string) bool {
+		if tag != "a" {
+			return false
+		}
+		resets.Add(1)
+		s.outbounds[tag].(*countedRecoveryOutbound).broken.Store(false)
+		return true
+	})
+	s.NetworkUnavailable()
+	s.NetworkReturned()
+	waitAvailability(t, func() bool { return s.Status().MembersQualified == 1 })
+	if resets.Load() != 1 || s.Status().ProbesInFlight == 0 {
+		t.Fatal("stale client repair waited for all failed peers")
+	}
+	if peak.Load() > 2 {
+		t.Fatal("inline repair exceeded pool concurrency")
+	}
+	s.NetworkUnavailable()
+	waitAvailability(t, func() bool { s.access.Lock(); defer s.access.Unlock(); return !s.checkPending })
 }
 
 func TestRecoveryPreservesEarlierServerFailuresAndCleansOnlyOnce(t *testing.T) {
