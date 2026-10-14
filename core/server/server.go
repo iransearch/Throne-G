@@ -2,6 +2,7 @@ package main
 
 import (
 	"ThroneCore/gen"
+	"ThroneCore/internal/autoselector"
 	"ThroneCore/internal/boxbox"
 	"ThroneCore/internal/boxdns"
 	"ThroneCore/internal/boxmain"
@@ -488,7 +489,26 @@ func (s *server) Start(ctx context.Context, in *gen.LoadConfigReq) (out *gen.Err
 		setXrayFullGates(gates)
 	}
 
-	box, cancel, err := boxmain.Create([]byte(*in.CoreConfig), boxCtx.publish)
+	box, cancel, err := boxmain.Create([]byte(*in.CoreConfig), func(box *boxbox.Box) {
+		boxCtx.publish(box)
+		// Bind to this profile's sidecar before Start, never a later connection
+		// or a throwaway URL test. Resetting one client leaves the TUN intact.
+		stateMu.RLock()
+		instance, gate := xrayInstance, xrayGate
+		stateMu.RUnlock()
+		manager := service.FromContext[adapter.OutboundManager](box.Context())
+		for _, outbound := range manager.Outbounds() {
+			if selector, ok := outbound.(*autoselector.AutoSelector); ok {
+				selector.SetMemberRecovery(func(tag string) bool {
+					live := instance
+					if gate != nil {
+						live = gate.Instance()
+					}
+					return xray.ResetHysteria2Member(live, tag)
+				})
+			}
+		}
+	})
 	// A published context is not readiness. Release the shared main/AI Pool
 	// scheduler only after DNS, egress and inbounds have started successfully.
 	// Xray listeners stay available earlier for remote rule-set downloads.

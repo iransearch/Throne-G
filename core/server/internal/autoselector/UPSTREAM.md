@@ -2,7 +2,9 @@
 
 Adapted from throneproj/sing-box f154bec036c9, protocol/group/autoselector.go
 and autoselector_health.go. Distributed under the upstream GPL-3.0 license.
-The health implementation is retained unchanged. Successful round-robin dials
+The upstream health ring/ranking is retained. Local SOCKS acceptance does not
+clear end-to-end probe failures or dial cooldowns, and tested-dead bridges are
+excluded from new dials until a real probe succeeds. Successful round-robin dials
 update the selected marker without interrupting established connections.
 Status types alias upstream so existing QueryAutoSelectors and AutoSelectorAction RPCs keep working.
 
@@ -14,6 +16,13 @@ the existing selector mutex. Cooldown, network support, retries and pinning reta
 the original policy. Existing connections are not closed by the rotation.
 
 Keep these source copies aligned when changing the pinned sing-box dependency.
+
+After suspension/default-network changes, the main selector can repair failed
+Xray Hysteria2 clients through a callback bound to that profile before Start.
+Healthy members, the TUN, DNS and the box process stay intact. Each failed member
+gets one reset in a two-minute window after network return; a fresh external
+probe is required before failure samples from the old client are invalidated.
+The AI selector remains the upstream implementation, with its independent policy.
 
 
 Validation:

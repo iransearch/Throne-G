@@ -168,6 +168,10 @@ type AutoSelector struct {
 	nextRotateAt     time.Time
 	lastKickAt       time.Time
 	recentDialFails  map[string]time.Time
+	recoverMember    func(string) bool
+	recoveryEpoch    uint64
+	recoveredMembers map[string]uint64
+	recoveryUntil    time.Time
 
 	connAccess    sync.Mutex
 	connOK        bool
@@ -562,6 +566,7 @@ func (s *AutoSelector) InterfaceUpdated(_ context.Context) {
 		s.access.Unlock()
 		return
 	}
+	s.beginNetworkRecoveryLocked()
 	s.lastKickAt = time.Now()
 	s.access.Unlock()
 	select {
@@ -677,6 +682,13 @@ type probeResult struct {
 }
 
 func (s *AutoSelector) runRound(urgent bool) {
+	if s.ctx.Err() != nil || (s.pause != nil && s.pause.IsPaused()) {
+		return
+	}
+	if s.networkInterfaceDown() {
+		s.enterSuspended(time.Now(), time.Time{})
+		return
+	}
 	batch := s.roundBatch(urgent)
 	if len(batch) == 0 {
 		return
@@ -686,6 +698,7 @@ func (s *AutoSelector) runRound(urgent bool) {
 	if len(results) == 0 {
 		return
 	}
+	results = s.recoverFailedResults(results)
 	s.commitRound(results, startedAt)
 }
 
@@ -725,6 +738,11 @@ func (s *AutoSelector) probeBatch(batch []string, urgent bool) []probeResult {
 				return
 			}
 			defer func() { <-limiter }()
+			// A queued member must not start after a pause/outage that arrived
+			// while earlier probes occupied the concurrency slots.
+			if s.ctx.Err() != nil || s.networkInterfaceDown() || (s.pause != nil && s.pause.IsPaused()) {
+				return
+			}
 
 			s.access.Lock()
 			s.probesInFlight++
@@ -757,6 +775,9 @@ func (s *AutoSelector) probe(detour adapter.Outbound) (time.Duration, error) {
 // local network, then either records or discards them. Successes always commit:
 // one working member proves the network is up.
 func (s *AutoSelector) commitRound(results []probeResult, startedAt time.Time) {
+	if s.ctx.Err() != nil || (s.pause != nil && s.pause.IsPaused()) {
+		return // In-flight results during a local pause say nothing about members.
+	}
 	var succeeded, failed, localErrors int
 	for _, result := range results {
 		if result.value == rttFailed {
@@ -920,6 +941,7 @@ func (s *AutoSelector) enterSuspended(now time.Time, since time.Time) {
 	}
 	s.suspended = true
 	s.suspendedSince = now
+	s.beginNetworkRecoveryLocked()
 	since = rollbackSince(now, since)
 	rolledSamples := 0
 	rolledCooldowns := 0
@@ -1262,9 +1284,9 @@ func (s *AutoSelector) pick(network string, tried map[string]bool) adapter.Outbo
 		}
 	}
 
-	if current := s.selectedFor(network); current != nil && !tried[current.Tag()] {
-		if health, loaded := s.members[current.Tag()]; !loaded || !health.inCooldown(now) {
-			return current
+	if current := s.selectedFor(network); current != nil {
+		if detour := s.usableLocked(current.Tag(), network, tried, now, false); detour != nil {
+			return detour
 		}
 	}
 	for _, tag := range s.qualified {
@@ -1294,6 +1316,14 @@ func (s *AutoSelector) usableLocked(tag string, network string, tried map[string
 	detour, loaded := s.outbounds[tag]
 	if !loaded || !common.Contains(detour.Network(), network) {
 		return nil
+	}
+	// Local SOCKS acceptance cannot override a failed external tunnel probe.
+	if detour.Type() == "socks" {
+		if health := s.members[tag]; health != nil {
+			if stats := health.stats(now); stats.All > 0 && !stats.Alive() {
+				return nil
+			}
+		}
 	}
 	if !ignoreCooldown {
 		if health, ok := s.members[tag]; ok && health.inCooldown(now) {
@@ -1383,9 +1413,15 @@ func (s *AutoSelector) noteDialResult(detour adapter.Outbound, network string, e
 	if err == nil {
 		s.access.Lock()
 		if health, loaded := s.members[tag]; loaded {
-			health.reward(now)
+			if detour.Type() == "socks" {
+				health.dialTotal++ // CONNECT/UDP ASSOCIATE is not external proof.
+			} else {
+				health.reward(now)
+			}
 		}
-		delete(s.recentDialFails, tag)
+		if detour.Type() != "socks" {
+			delete(s.recentDialFails, tag)
+		}
 		if current := s.selectedFor(network); current == nil || current.Tag() != tag {
 			// The member we moved off just failed to dial, so its live
 			// connections are already broken; honouring the interrupt setting
