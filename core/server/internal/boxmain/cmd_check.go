@@ -2,6 +2,7 @@ package boxmain
 
 import (
 	"ThroneCore/internal/autoselector"
+	"ThroneCore/internal/probedns"
 	"context"
 	"github.com/sagernet/sing-box/include"
 
@@ -12,7 +13,9 @@ func Check(content []byte) error {
 	ctx := context.Background()
 	registry := include.OutboundRegistry()
 	autoselector.RegisterAutoSelector(registry)
-	ctx = boxbox.Context(ctx, include.InboundRegistry(), registry, include.EndpointRegistry(), include.DNSTransportRegistry(), include.ServiceRegistry(), include.CertificateProviderRegistry())
+	dnsRegistry := include.DNSTransportRegistry()
+	probedns.Register(dnsRegistry)
+	ctx = boxbox.Context(ctx, include.InboundRegistry(), registry, include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry(), include.CertificateProviderRegistry())
 	options, err := parseConfig(ctx, content)
 	if err != nil {
 		return err
