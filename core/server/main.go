@@ -3,6 +3,7 @@ package main
 import (
 	"ThroneCore/gen"
 	"ThroneCore/internal/boxmain"
+	"ThroneCore/internal/buildidentity"
 	"ThroneCore/parentcheck"
 	"flag"
 	"fmt"
@@ -135,7 +136,13 @@ func serveProbe(listener net.Listener, service *protoRPCServer) error {
 func RunCore() {
 	port := flag.Int("port", 19810, "ProtoRPC listen port")
 	probeMode := flag.Bool("probe-mode", false, "run a one-shot ProtoRPC health probe")
+	buildInfo := flag.Bool("build-info", false, "print the embedded Core source identity and exit")
 	flag.Parse()
+	if *buildInfo {
+		info, _ := runtimeDebug.ReadBuildInfo()
+		fmt.Println(buildidentity.Report(info))
+		return
+	}
 	if *port < 0 || *port > 65535 || (!*probeMode && *port == 0) {
 		log.Fatalf("invalid -port %d", *port)
 	}
