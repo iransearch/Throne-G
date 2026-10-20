@@ -5,7 +5,7 @@ import (
 	"ThroneCore/internal/buildidentity"
 	"os"
 	"runtime"
-	"runtime/debug"
+	runtimeDebug "runtime/debug"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/xtls/xray-core/core"
@@ -13,7 +13,7 @@ import (
 )
 
 func populateBuildIdentity(out *gen.IsPrivilegedResponse) {
-	info, _ := debug.ReadBuildInfo()
+	info, _ := runtimeDebug.ReadBuildInfo()
 	commit, modified := buildidentity.Revision(info)
 	out.SingBoxVersion = proto.String(C.Version)
 	out.XrayVersion = proto.String(core.Version())
