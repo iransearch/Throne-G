@@ -235,12 +235,19 @@ function Build-CoreTarget {
         $destination = Join-Path $OutputDirectory $Name
         New-Directory $destination
         $output = Join-Path $destination 'ThroneCore.exe'
-        $ldflags = "-w -s -X github.com/sagernet/sing-box/constant.Version=$singVersion -X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0"
-        Invoke-Go $GoExecutable 'build' "-p=$Parallelism" '-mod=mod' '-o' $output '-trimpath' '-ldflags' $ldflags '-tags' $Tags '.'
+        $ldflags = "-w -s -X github.com/sagernet/sing-box/constant.Version=$singVersion -X ThroneCore/internal/buildidentity.SourceCommit=$sourceCommit -X ThroneCore/internal/buildidentity.SourceModified=$sourceModified -X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0"
+        Invoke-Go $GoExecutable 'build' "-p=$Parallelism" '-mod=mod' '-o' $output '-trimpath' '-buildvcs=false' '-ldflags' $ldflags '-tags' $Tags '.'
     } finally {
         Pop-Location
     }
 
+    # Read the actual embedded identity from every target before packaging.
+    # -build-info exits before RPC, DNS, TUN and parent-process monitoring.
+    $binaryIdentity = (Invoke-Native $output '-build-info' | Out-String)
+    $expectedIdentity = "CORE_BUILD_IDENTITY commit=$sourceCommit modified=$sourceModified"
+    if (-not (($binaryIdentity -split '\r?\n') -contains $expectedIdentity)) {
+        throw "Built $Name did not report the selected source identity: $expectedIdentity"
+    }
     $machine = Get-PeMachine $output
     if ($machine -ne $ExpectedMachine) {
         throw ('Unexpected PE machine for {0}: expected 0x{1:X4}, received 0x{2:X4}' -f $Name, $ExpectedMachine, $machine)
@@ -355,17 +362,19 @@ Invoke-Go $modernGo install "github.com/chai2010/protorpc/protoc-gen-protorpc@$P
 
 Write-Step 'Preparing an isolated source copy'
 $sourceCommit = (& git.exe -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sourceCommit)) {
-    $sourceCommit = 'unknown (source has no Git metadata)'
-    $dirty = 'unknown'
-} else {
-    $sourceStatus = (& git.exe -C $RepoRoot status --porcelain --untracked-files=normal -- core/server core/protorpc 2>$null | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        $dirty = 'unknown'
-    } else {
-        $dirty = -not [string]::IsNullOrWhiteSpace($sourceStatus)
-    }
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$' -or $sourceCommit -ne $downloadedCommit) {
+    throw 'The selected Core source commit changed or could not be verified. Build stopped.'
 }
+$sourceStatus = (& git.exe -C $RepoRoot status --porcelain --untracked-files=normal -- core/server core/protorpc 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw 'Could not determine whether the selected Core source is modified. Build stopped.'
+}
+$dirty = -not [string]::IsNullOrWhiteSpace($sourceStatus)
+$sourceModified = $dirty.ToString().ToLowerInvariant()
+if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'core\server\internal\buildidentity\identity.go'))) {
+    throw 'Selected Core source does not support explicit source identity. Update the Core source branch.'
+}
+Write-Host "Embedding Core source identity: commit=$sourceCommit modified=$sourceModified" -ForegroundColor Cyan
 Copy-SourceTree $StagingDirectory
 $serverDirectory = Join-Path $StagingDirectory 'core\server'
 $genDirectory = Join-Path $serverDirectory 'gen'

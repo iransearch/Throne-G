@@ -95,3 +95,20 @@ For script validation without downloads or compilation:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-ThroneCore.ps1 -ValidateOnly
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-SGuard.ps1 -ValidateOnly
 ```
+
+## Exact Core source identity
+
+The builder embeds the full selected Core checkout commit and its source-only
+modified flag with Go linker `-X` values, before protobuf generation and staging.
+`-buildvcs=false` prevents the enclosing builder checkout from being reported as
+the Core repository. All three targets use the same selected commit. Each output
+is executed with `-build-info` and must report both exact stamps before packaging.
+The running Core returns these values in its identity handshake. `BUILD-INFO.txt`
+uses the same captured values. If the selected checkout changes or its metadata
+cannot be read, the build stops rather than assigning the builder's commit.
+
+Update `tools/Build-ThroneCore.ps1` in the local builder, then run the usual
+`build-core.cmd --sguard`. This requires a Core source branch containing the
+explicit buildidentity linker fields. App 1.4.14 already reads these fields and
+needs no source change for this correction. Rebuild Core, then package its new
+SGuard outputs with the app; old executables keep their old stamped metadata.
