@@ -82,6 +82,9 @@ func (s *protoRPCServer) IsPrivileged(in *gen.EmptyReq, out *gen.IsPrivilegedRes
 	err := adaptProtoRPC(out, func() (*gen.IsPrivilegedResponse, error) {
 		return globalServer.IsPrivileged(context.Background(), in)
 	})
+	if err == nil {
+		populateBuildIdentity(out)
+	}
 	if err == nil && s.readyAddress != "" {
 		// The generated server has already accepted this real RPC. Starting the
 		// OS monitors here keeps their slow initialization off the listen path;

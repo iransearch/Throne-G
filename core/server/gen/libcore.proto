@@ -242,6 +242,15 @@ message SetSystemDNSRequest {
 
 message IsPrivilegedResponse {
   optional bool has_privilege = 1 [default = false];
+  // Additive identity fields are ignored by older clients. Values describe
+  // this answering process, never a sidecar manifest or another executable.
+  optional string sing_box_version = 2;
+  optional string xray_version = 3;
+  optional string source_commit = 4;
+  optional string source_modified = 5;
+  optional string architecture = 6;
+  optional int32 process_id = 7;
+  optional string go_version = 8;
 }
 
 message GetDefaultInterfaceResponse {
