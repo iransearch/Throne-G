@@ -3,6 +3,7 @@ package boxmain
 import (
 	"ThroneCore/internal/autoselector"
 	"ThroneCore/internal/probedns"
+	"ThroneCore/internal/vpndns"
 	"context"
 	"os"
 	"os/user"
@@ -84,6 +85,7 @@ func newBoxContext() context.Context {
 	autoselector.RegisterAutoSelector(registry)
 	dnsRegistry := include.DNSTransportRegistry()
 	probedns.Register(dnsRegistry)
+	vpndns.Register(dnsRegistry)
 	ctx = box.Context(ctx, include.InboundRegistry(), registry, include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry(), include.CertificateProviderRegistry())
 	return ctx
 }

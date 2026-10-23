@@ -3,6 +3,7 @@ package boxbox
 import (
 	"ThroneCore/internal/autoselector"
 	"ThroneCore/internal/netdiag"
+	"ThroneCore/internal/vpndns"
 	"context"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	dns "ThroneCore/internal/dnsengine"
 	"github.com/sagernet/sing-box/adapter"
 	boxCertificate "github.com/sagernet/sing-box/adapter/certificate"
 	"github.com/sagernet/sing-box/adapter/endpoint"
@@ -25,7 +27,6 @@ import (
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
-	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/dns/transport/local"
 	"github.com/sagernet/sing-box/experimental"
 	"github.com/sagernet/sing-box/experimental/cachefile"
@@ -81,6 +82,10 @@ func Context(
 	serviceRegistry adapter.ServiceRegistry,
 	certificateProviderRegistry adapter.CertificateProviderRegistry,
 ) context.Context {
+	// Register before JSON parsing, including callers using this RPC context.
+	if registry, ok := dnsTransportRegistry.(*dns.TransportRegistry); ok {
+		vpndns.Register(registry)
+	}
 	if service.FromContext[option.InboundOptionsRegistry](ctx) == nil ||
 		service.FromContext[adapter.InboundRegistry](ctx) == nil {
 		ctx = service.ContextWith[option.InboundOptionsRegistry](ctx, inboundRegistry)
@@ -144,6 +149,9 @@ func New(options Options) (*Box, error) {
 	}
 	if dnsTransportRegistry == nil {
 		return nil, E.New("missing DNS transport registry in context")
+	}
+	if registry, ok := dnsTransportRegistry.(*dns.TransportRegistry); ok {
+		vpndns.Register(registry)
 	}
 	if serviceRegistry == nil {
 		return nil, E.New("missing service registry in context")
