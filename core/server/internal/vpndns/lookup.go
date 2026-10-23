@@ -21,6 +21,7 @@ type ipResult struct {
 	responses map[uint16]*mdns.Msg
 	err       error
 	tag       string
+	cached    bool
 }
 type sharedLookup struct {
 	once   sync.Once
@@ -172,7 +173,15 @@ func (t *Transport) cached(child adapter.DNSTransport, query *mdns.Msg, types []
 	return responses
 }
 
-func (t *Transport) lookupResponses(parent context.Context, query *mdns.Msg, types []uint16, options adapter.DNSQueryOptions) ipResult {
+func (t *Transport) lookupResponses(parent context.Context, query *mdns.Msg, types []uint16, options adapter.DNSQueryOptions) (answer ipResult) {
+	started := time.Now()
+	defer func() {
+		source := "ip-network"
+		if answer.cached {
+			source = "ip-cache"
+		}
+		t.recordResult(answer.tag, source, started, answer.err)
+	}()
 	t.gate.Lock()
 	closed := t.closed
 	t.gate.Unlock()
@@ -205,7 +214,7 @@ func (t *Transport) lookupResponses(parent context.Context, query *mdns.Msg, typ
 			if t.logger != nil {
 				t.logger.DebugContext(ctx, "VPN DNS IP cache winner=", child.Tag())
 			}
-			return ipResult{responses: responses, tag: child.Tag()}
+			return ipResult{responses: responses, tag: child.Tag(), cached: true}
 		}
 	}
 	if r := t.ipStage(ctx, query, types, options, t.children, t.timeout); r.err == nil {
@@ -256,7 +265,7 @@ func (t *Transport) ipStage(parent context.Context, query *mdns.Msg, types []uin
 func (t *Transport) queryIP(ctx context.Context, child adapter.DNSTransport, query *mdns.Msg, types []uint16, options adapter.DNSQueryOptions) ipResult {
 	responses := t.cached(child, query, types, options)
 	if hasAddresses(responses) || len(responses) == len(types) {
-		return ipResult{responses: responses, tag: child.Tag()}
+		return ipResult{responses: responses, tag: child.Tag(), cached: true}
 	}
 	results := make(chan result, len(types))
 	t.gate.Lock()

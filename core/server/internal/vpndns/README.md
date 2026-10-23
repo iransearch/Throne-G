@@ -41,11 +41,29 @@ UDP has no implicit TCP retry and TCP sends no background reuse probes.
 
 Register the transport before parsing in CLI/Check/RPC contexts. Box.New installs
 the local DNS router. The existing Core builder compiles these packages normally;
-go.mod/go.sum and dependency pins are unchanged. Rebuild both Windows 1.4.34 and
+go.mod/go.sum and dependency pins are unchanged. Rebuild both Windows 1.4.35 and
 the modern/legacy Throne-G Core payloads.
 
-Debug logs identify network/raw, IP network and IP cache winners by provider tag.
+Structured `CoreDiagnostic` events identify race construction, sampled winners
+and final cumulative counters without requiring Debug logging. No queried names,
+answers, endpoints, configuration tags or raw errors are included. Events use a
+generated `dns` identity, correlated Box ID, provider `index`, `source`
+(`raw-network`, `ip-network`, `ip-cache`), stage/result `elapsedMs`, failure class
+and cumulative `wins0` ... `wins4`, `cached`, `failures`, and total `count`.
+Indices 0..3 are configured primary order, 4 is TCP fallback, -1 is no winner.
+Windows' default order is Google, Cloudflare, Yandex, additional UDP resolver.
+The first 32 results and every 128th result are emitted; all results update the
+counters, and close emits one final summary. Raw result latency covers the
+winning stage; IP latency covers preflight and both stages of the logical lookup.
+Existing Debug messages are retained.
 `dns.final` describes the default route and is not a provider-winner report.
+
+Windows Proxy routing invokes `resolve` through the existing DNS rules before a
+VPN outbound, so the default uses this composite while predefined/Shield,
+bootstrap and scoped direct DNS retain precedence. The original domain remains
+available to AI/domain rules; connection setup uses resolved IP addresses.
+Preceding Shield blockers run again after resolution to catch IP-based matches.
+TUN traffic, physical probes and internal DNS detours do not enter that new rule.
 
 Run from core/server:
 

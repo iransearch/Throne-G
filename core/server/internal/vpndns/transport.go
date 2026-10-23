@@ -47,6 +47,7 @@ type Transport struct {
 	workers         sync.WaitGroup
 	ipOnce          sync.Once
 	ipClient        *dns.Client
+	diagnostics     raceDiagnostics
 }
 
 func New(ctx context.Context, logger log.ContextLogger, tag string, options Options) (adapter.DNSTransport, error) {
@@ -94,6 +95,7 @@ func New(ctx context.Context, logger log.ContextLogger, tag string, options Opti
 			return nil, errors.New("vpn-dns-race fallback must use the same VPN detour")
 		}
 	}
+	t.initDiagnostics()
 	return t, nil
 }
 
@@ -152,6 +154,7 @@ func (t *Transport) Start(stage adapter.StartStage) error {
 	return nil
 }
 func (t *Transport) Close() error {
+	defer t.closeDiagnostics()
 	t.gate.Lock()
 	t.closed = true
 	if t.cancel != nil {
@@ -253,6 +256,7 @@ func (t *Transport) receive(ctx context.Context, message *mdns.Msg, results <-ch
 			}
 			if r.err == nil {
 				r.response.Id = message.Id
+				t.recordResult(r.tag, "raw-network", started, nil)
 				if t.logger != nil {
 					t.logger.DebugContext(ctx, "VPN DNS winner=", r.tag, " elapsed_ms=", time.Since(started).Milliseconds())
 				}
@@ -264,14 +268,20 @@ func (t *Transport) receive(ctx context.Context, message *mdns.Msg, results <-ch
 	return nil, fmt.Errorf("all VPN DNS servers failed: %w", errors.Join(errs...))
 }
 
-func (t *Transport) rawExchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, error) {
+func (t *Transport) rawExchange(ctx context.Context, message *mdns.Msg) (response *mdns.Msg, err error) {
+	started := time.Now()
+	defer func() {
+		if err != nil {
+			t.recordResult("", "raw-network", started, err)
+		}
+	}()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if t.ctx != nil {
 		stop := context.AfterFunc(t.ctx, cancel)
 		defer stop()
 	}
-	response, err := t.raceStage(ctx, message, t.children, t.timeout)
+	response, err = t.raceStage(ctx, message, t.children, t.timeout)
 	if err == nil {
 		return response, nil
 	}

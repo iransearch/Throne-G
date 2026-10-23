@@ -50,7 +50,7 @@ func TestVPNDNSFixtures(t *testing.T) {
 	if dir == "" {
 		t.Skip("set IRSPEEDY_DNS_FIXTURES to emitted Windows fixtures")
 	}
-	for _, name := range []string{"proxy", "tun", "split-proxy", "split-tun", "scoped"} {
+	for _, name := range []string{"proxy", "tun", "split-proxy", "split-tun", "scoped", "proxy-shield-ai", "proxy-behavior"} {
 		t.Run(name, func(t *testing.T) {
 			raw, err := os.ReadFile(filepath.Join(dir, name+".json"))
 			if err != nil {
@@ -61,8 +61,50 @@ func TestVPNDNSFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 			profile := map[string]stdjson.RawMessage{"dns": doc["dns"],
-				"outbounds": stdjson.RawMessage(`[{"type":"direct","tag":"proxy"},{"type":"direct","tag":"split-direct"}]`),
+				"outbounds": stdjson.RawMessage(`[{"type":"direct","tag":"proxy"},{"type":"direct","tag":"ai-proxy"},{"type":"direct","tag":"split-direct"},{"type":"direct","tag":"direct"},{"type":"block","tag":"block"}]`),
 				"route":     stdjson.RawMessage(`{"auto_detect_interface":true,"default_domain_resolver":{"server":"dns-direct","strategy":"prefer_ipv4"}}`)}
+			if name == "proxy-shield-ai" || name == "proxy-behavior" {
+				// Validate the actual C# traffic actions and logical matchers too.
+				// Replace only external geo data with local inline test rules.
+				var route map[string]any
+				if err = stdjson.Unmarshal(doc["route"], &route); err != nil {
+					t.Fatal(err)
+				}
+				tags := map[string]bool{}
+				var collect func(any)
+				collect = func(value any) {
+					switch v := value.(type) {
+					case map[string]any:
+						if tag, ok := v["rule_set"].(string); ok {
+							tags[tag] = true
+						}
+						if list, ok := v["rule_set"].([]any); ok {
+							for _, value := range list {
+								if tag, ok := value.(string); ok {
+									tags[tag] = true
+								}
+							}
+						}
+						for key, child := range v {
+							if key != "rule_set" {
+								collect(child)
+							}
+						}
+					case []any:
+						for _, child := range v {
+							collect(child)
+						}
+					}
+				}
+				collect(route["rules"])
+				var sets []any
+				for tag := range tags {
+					sets = append(sets, map[string]any{"type": "inline", "tag": tag, "rules": []any{map[string]any{"domain": "fixture.invalid"}}})
+				}
+				route["rule_set"] = sets
+				profile["route"], _ = stdjson.Marshal(route)
+				profile["inbounds"] = stdjson.RawMessage(`[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1"}]`)
+			}
 			data, err := stdjson.Marshal(profile)
 			if err != nil {
 				t.Fatal(err)
