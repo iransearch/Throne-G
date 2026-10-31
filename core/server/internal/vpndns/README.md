@@ -5,12 +5,14 @@ Reference: SPEEDY-Exclave-Balancer commit
 ExclaveBalancerConfig.vpnDns().
 
 The app-owned `vpn-dns-race` transport is separate from direct/probe DNS.
-Google, Cloudflare and Yandex use verified DoH; 78.186.60.77 uses UDP/53.
+The transport accepts 2 through 7 primary providers, plus a separate TCP fallback.
+Google, Cloudflare and Yandex use verified DoH; 78.186.60.77, 213.14.111.50,
+94.20.20.20 and 217.218.127.127 use UDP/53 in the Windows seven-provider profile.
 Every request and the TCP fallback pass through the same VPN detour.
 
 | Behavior | Implementation matching Android |
 | --- | --- |
-| Raw forwarding | All four primary requests run concurrently; first valid completion wins |
+| Raw forwarding | All configured primary requests run concurrently; first valid completion wins |
 | Raw cache | Raw A/AAAA requests neither read nor populate the IP cache |
 | Raw failure | SERVFAIL with recursion available after every stage fails |
 | IP cache | Separate native TTL entries per provider and address family |
@@ -41,17 +43,24 @@ UDP has no implicit TCP retry and TCP sends no background reuse probes.
 
 Register the transport before parsing in CLI/Check/RPC contexts. Box.New installs
 the local DNS router. The existing Core builder compiles these packages normally;
-go.mod/go.sum and dependency pins are unchanged. Rebuild both Windows 1.4.35 and
-the modern/legacy Throne-G Core payloads.
+go.mod/go.sum and dependency pins are unchanged. Rebuild the modern/legacy
+Throne-G Core payloads and package them with Windows 1.4.64. An app-only rebuild
+using the previous Core aecfe86 is insufficient: that Core rejects seven primary
+servers. Existing profiles with two through four providers remain supported.
+The unrelated `https-race` physical/probe DNS transport retains its own limit.
 
 Structured `CoreDiagnostic` events identify race construction, sampled winners
 and final cumulative counters without requiring Debug logging. No queried names,
 answers, endpoints, configuration tags or raw errors are included. Events use a
 generated `dns` identity, correlated Box ID, provider `index`, `source`
 (`raw-network`, `ip-network`, `ip-cache`), stage/result `elapsedMs`, failure class
-and cumulative `wins0` ... `wins4`, `cached`, `failures`, and total `count`.
-Indices 0..3 are configured primary order, 4 is TCP fallback, -1 is no winner.
-Windows' default order is Google, Cloudflare, Yandex, additional UDP resolver.
+and cumulative `wins0` ... `wins7`, `cached`, `failures`, and total `count`.
+Indices 0 through N-1 are configured primary order; N is TCP fallback, -1 is no
+winner. Thus a four-provider profile keeps fallback index 4, while a seven-provider
+profile uses index 7. The counter storage includes every primary plus fallback.
+Windows' order is Google, Cloudflare, Yandex, 78.186.60.77, 213.14.111.50,
+94.20.20.20, 217.218.127.127. Windows 1.4.64 accepts all eight counter fields;
+older diagnostic readers reject lines containing the new fields.
 The first 32 results and every 128th result are emitted; all results update the
 counters, and close emits one final summary. Raw result latency covers the
 winning stage; IP latency covers preflight and both stages of the logical lookup.
@@ -70,3 +79,10 @@ Run from core/server:
 ```sh
 go test -race ./internal/dnsengine ./internal/vpndns ./internal/boxmain ./internal/boxbox
 ```
+
+Native tests exercise constructor bounds, four- and seven-provider configurations
+with real verified loopback TLS/UDP/TCP detours, every primary and fallback winner,
+completion ordering, cancellation without waiting for losers, the seventh UDP
+provider's IP cache and cache clearing, and separate 2/4/7-provider counters.
+`IRSPEEDY_DNS_FIXTURES` also validates the Windows-generated TUN/Proxy/Shield
+profiles through the actual registered parser and Box constructor.

@@ -18,7 +18,10 @@ const vpnDNSProfile = `{"dns":{"servers":[{"type":"vpn-dns-race","tag":"dns-remo
 {"type":"https","tag":"google","server":"8.8.8.8","detour":"proxy","path":"/dns-query","tls":{"enabled":true,"server_name":"dns.google"}},
 {"type":"https","tag":"cloudflare","server":"1.1.1.1","detour":"proxy","path":"/dns-query","tls":{"enabled":true,"server_name":"cloudflare-dns.com"}},
 {"type":"https","tag":"yandex","server":"77.88.8.8","detour":"proxy","path":"/dns-query","tls":{"enabled":true,"server_name":"common.dot.dns.yandex.net"}},
-{"type":"udp","tag":"additional","server":"78.186.60.77","server_port":53,"detour":"proxy"}],
+{"type":"udp","tag":"additional","server":"78.186.60.77","server_port":53,"detour":"proxy"},
+{"type":"udp","tag":"additional-213-14-111-50","server":"213.14.111.50","server_port":53,"detour":"proxy"},
+{"type":"udp","tag":"additional-94-20-20-20","server":"94.20.20.20","server_port":53,"detour":"proxy"},
+{"type":"udp","tag":"additional-217-218-127-127","server":"217.218.127.127","server_port":53,"detour":"proxy"}],
 "fallback":{"type":"tcp","server":"1.1.1.1","server_port":53,"detour":"proxy"}}],
 "rules":[{"action":"route","server":"dns-remote","timeout":"12s"}]},
 "outbounds":[{"type":"direct","tag":"proxy"}],"route":{"auto_detect_interface":true}}`
@@ -34,7 +37,7 @@ func TestVPNDNSRegistrationAndCheck(t *testing.T) {
 			t.Fatal("VPN DNS type not registered before parsing")
 		}
 		o := cfg.DNS.Servers[0].Options.(*vpndns.Options)
-		if len(o.Servers) != 4 || o.Fallback.Type != "tcp" {
+		if len(o.Servers) != 7 || o.Fallback.Type != "tcp" {
 			t.Fatal("nested providers/fallback lost")
 		}
 	}

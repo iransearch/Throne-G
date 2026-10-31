@@ -48,10 +48,10 @@ func fixture(t *testing.T) *Transport {
 // Reproduce delayed arbitration deterministically: all replies are already queued
 // when the selector runs, with a non-Google reply preceding Google's valid reply.
 func TestCompletionOrderWhenSeveralAnswersAreReady(t *testing.T) {
-	for _, winner := range []int{1, 2, 3} {
+	for _, winner := range []int{1, 2, 3, 4, 5, 6} {
 		t.Run(strconv.Itoa(winner), func(t *testing.T) {
 			tr, q := fixture(t), question()
-			results := make(chan result, 4)
+			results := make(chan result, MaxPrimaryServers)
 			first := reply(q, winner)
 			results <- result{response: first, tag: "first-non-google"}
 			results <- result{response: reply(q, 0), tag: "google"}
@@ -64,59 +64,61 @@ func TestCompletionOrderWhenSeveralAnswersAreReady(t *testing.T) {
 }
 
 func TestEachPrimaryWinsWithoutWaitingForCanceledLosers(t *testing.T) {
-	for winner := 0; winner < 4; winner++ {
-		for _, async := range []bool{false, true} {
-			t.Run(strconv.Itoa(winner)+"/async-"+strconv.FormatBool(async), func(t *testing.T) {
-				tr := fixture(t)
-				started, canceled := make(chan struct{}, 4), make(chan struct{}, 3)
-				finishWinner, releaseLosers := make(chan struct{}), make(chan struct{})
-				t.Cleanup(func() { close(releaseLosers) })
-				for i := 0; i < 4; i++ {
-					i := i
-					tr.children = append(tr.children, &fake{exchange: func(ctx context.Context, q *mdns.Msg) (*mdns.Msg, error) {
-						started <- struct{}{}
-						if i == winner {
-							<-finishWinner
-							return reply(q, i), nil
+	for _, count := range []int{4, 7} {
+		for winner := 0; winner < count; winner++ {
+			for _, async := range []bool{false, true} {
+				t.Run(strconv.Itoa(count)+"/winner-"+strconv.Itoa(winner)+"/async-"+strconv.FormatBool(async), func(t *testing.T) {
+					tr := fixture(t)
+					started, canceled := make(chan struct{}, count), make(chan struct{}, count-1)
+					finishWinner, releaseLosers := make(chan struct{}), make(chan struct{})
+					t.Cleanup(func() { close(releaseLosers) })
+					for i := 0; i < count; i++ {
+						i := i
+						tr.children = append(tr.children, &fake{exchange: func(ctx context.Context, q *mdns.Msg) (*mdns.Msg, error) {
+							started <- struct{}{}
+							if i == winner {
+								<-finishWinner
+								return reply(q, i), nil
+							}
+							<-ctx.Done()
+							canceled <- struct{}{}
+							<-releaseLosers
+							return nil, ctx.Err()
+						}})
+					}
+					done := make(chan result, 1)
+					q := question()
+					if async {
+						tr.ExchangeAsync(context.Background(), q, func(r *mdns.Msg, err error) { done <- result{response: r, err: err} })
+					} else {
+						go func() { r, err := tr.Exchange(context.Background(), q); done <- result{response: r, err: err} }()
+					}
+					for i := 0; i < count; i++ {
+						select {
+						case <-started:
+						case <-time.After(time.Second):
+							close(finishWinner)
+							t.Fatal("not all primaries launched")
 						}
-						<-ctx.Done()
-						canceled <- struct{}{}
-						<-releaseLosers
-						return nil, ctx.Err()
-					}})
-				}
-				done := make(chan result, 1)
-				q := question()
-				if async {
-					tr.ExchangeAsync(context.Background(), q, func(r *mdns.Msg, err error) { done <- result{response: r, err: err} })
-				} else {
-					go func() { r, err := tr.Exchange(context.Background(), q); done <- result{response: r, err: err} }()
-				}
-				for i := 0; i < 4; i++ {
+					}
+					close(finishWinner)
 					select {
-					case <-started:
+					case r := <-done:
+						if r.err != nil || !r.response.Answer[0].(*mdns.A).A.Equal(net.IPv4(192, 0, 2, byte(winner+1))) {
+							t.Fatalf("wrong winner: %+v", r)
+						}
 					case <-time.After(time.Second):
-						close(finishWinner)
-						t.Fatal("not all primaries launched")
+						t.Fatal("winner waited for losers")
 					}
-				}
-				close(finishWinner)
-				select {
-				case r := <-done:
-					if r.err != nil || !r.response.Answer[0].(*mdns.A).A.Equal(net.IPv4(192, 0, 2, byte(winner+1))) {
-						t.Fatalf("wrong winner: %+v", r)
+					for i := 0; i < count-1; i++ {
+						select {
+						case <-canceled:
+						case <-time.After(time.Second):
+							t.Fatal("loser not canceled")
+						}
 					}
-				case <-time.After(time.Second):
-					t.Fatal("winner waited for losers")
-				}
-				for i := 0; i < 3; i++ {
-					select {
-					case <-canceled:
-					case <-time.After(time.Second):
-						t.Fatal("loser not canceled")
-					}
-				}
-			})
+				})
+			}
 		}
 	}
 }

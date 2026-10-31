@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -60,103 +61,174 @@ func remote(address string) option.RemoteDNSServerOptions {
 // Exercise the actual strict schema, registered constructor, verified HTTPS,
 // UDP, TCP fallback, and the production detour dialers against local endpoints.
 func TestConfigurationAndRealVPNDetours(t *testing.T) {
-	for winner := 0; winner < 5; winner++ {
-		t.Run(strconv.Itoa(winner), func(t *testing.T) {
-			opts := Options{}
-			for i := 0; i < 3; i++ {
-				i := i
-				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Method != "POST" || r.URL.Path != "/dns-query" {
-						t.Error("invalid DoH request")
-					}
-					raw, err := io.ReadAll(r.Body)
-					if err != nil {
-						return
-					}
-					q := new(mdns.Msg)
-					if err = q.Unpack(raw); err != nil {
-						t.Error(err)
-						return
-					}
-					response := reply(q, i)
-					if winner != i {
-						response.Rcode = mdns.RcodeServerFailure
-						response.Answer = nil
-					}
-					data, _ := response.Pack()
-					w.Header().Set("Content-Type", "application/dns-message")
-					w.Write(data)
-				}))
-				t.Cleanup(server.Close)
-				o := option.RemoteHTTPSDNSServerOptions{Path: "/dns-query"}
-				o.RemoteDNSServerOptions = remote(server.Listener.Addr().String())
-				o.TLS = &option.OutboundTLSOptions{Enabled: true, ServerName: "example.com", Certificate: []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))}}
-				opts.Servers = append(opts.Servers, option.DNSServerOptions{Type: "https", Options: &o})
-			}
-			packet, err := net.ListenPacket("udp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			udp := &mdns.Server{PacketConn: packet, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) {
-				r := reply(q, 3)
-				if winner != 3 {
-					r.Rcode = mdns.RcodeServerFailure
-					r.Answer = nil
+	for _, count := range []int{4, 7} {
+		for winner := 0; winner <= count; winner++ {
+			t.Run(strconv.Itoa(count)+"/winner-"+strconv.Itoa(winner), func(t *testing.T) {
+				opts := Options{}
+				for i := 0; i < 3; i++ {
+					i := i
+					server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method != "POST" || r.URL.Path != "/dns-query" {
+							t.Error("invalid DoH request")
+						}
+						raw, err := io.ReadAll(r.Body)
+						if err != nil {
+							return
+						}
+						q := new(mdns.Msg)
+						if err = q.Unpack(raw); err != nil {
+							t.Error(err)
+							return
+						}
+						response := reply(q, i)
+						if winner != i {
+							response.Rcode = mdns.RcodeServerFailure
+							response.Answer = nil
+						}
+						data, _ := response.Pack()
+						w.Header().Set("Content-Type", "application/dns-message")
+						w.Write(data)
+					}))
+					t.Cleanup(server.Close)
+					o := option.RemoteHTTPSDNSServerOptions{Path: "/dns-query"}
+					o.RemoteDNSServerOptions = remote(server.Listener.Addr().String())
+					o.TLS = &option.OutboundTLSOptions{Enabled: true, ServerName: "example.com", Certificate: []string{string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))}}
+					opts.Servers = append(opts.Servers, option.DNSServerOptions{Type: "https", Options: &o})
 				}
-				w.WriteMsg(r)
-			})}
-			go udp.ActivateAndServe()
-			t.Cleanup(func() { udp.Shutdown() })
-			u := remote(packet.LocalAddr().String())
-			opts.Servers = append(opts.Servers, option.DNSServerOptions{Type: "udp", Options: &u})
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			var fallbackCalls atomic.Int32
-			tcp := &mdns.Server{Listener: listener, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) { fallbackCalls.Add(1); w.WriteMsg(reply(q, 4)) })}
-			go tcp.ActivateAndServe()
-			t.Cleanup(func() { tcp.Shutdown() })
-			f := remote(listener.Addr().String())
-			opts.Fallback = &option.DNSServerOptions{Type: "tcp", Options: &f}
+				for i := 3; i < count; i++ {
+					i := i
+					packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+					if err != nil {
+						t.Fatal(err)
+					}
+					udp := &mdns.Server{PacketConn: packet, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) {
+						r := reply(q, i)
+						if winner != i {
+							r.Rcode = mdns.RcodeServerFailure
+							r.Answer = nil
+						}
+						w.WriteMsg(r)
+					})}
+					go udp.ActivateAndServe()
+					t.Cleanup(func() { udp.Shutdown() })
+					u := remote(packet.LocalAddr().String())
+					opts.Servers = append(opts.Servers, option.DNSServerOptions{Type: "udp", Options: &u})
+				}
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var fallbackCalls atomic.Int32
+				tcp := &mdns.Server{Listener: listener, Handler: mdns.HandlerFunc(func(w mdns.ResponseWriter, q *mdns.Msg) { fallbackCalls.Add(1); w.WriteMsg(reply(q, count)) })}
+				go tcp.ActivateAndServe()
+				t.Cleanup(func() { tcp.Shutdown() })
+				f := remote(listener.Addr().String())
+				opts.Fallback = &option.DNSServerOptions{Type: "tcp", Options: &f}
 
+				p := &proxy{Adapter: outbound.NewAdapter("test-vpn", "proxy", []string{"tcp", "udp"}, nil)}
+				ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &manager{proxy: p})
+				registry := dns.NewTransportRegistry()
+				transport.RegisterHTTPS(registry)
+				transport.RegisterUDP(registry)
+				transport.RegisterTCP(registry)
+				Register(registry)
+				ctx = service.ContextWith[option.DNSTransportOptionsRegistry](ctx, registry)
+				raw, err := json.MarshalContext(ctx, &option.DNSServerOptions{Type: Type, Tag: "dns-remote", Options: &opts})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var parsed option.DNSServerOptions
+				if err = json.UnmarshalContext(ctx, raw, &parsed); err != nil {
+					t.Fatal(err)
+				}
+				tr, err := registry.CreateDNSTransport(ctx, log.NewNOPFactory().Logger(), parsed.Tag, parsed.Type, parsed.Options)
+				if err != nil {
+					t.Fatalf("construct: %v; wire=%s; options=%+v", err, raw, parsed.Options)
+				}
+				t.Cleanup(func() { tr.Close() })
+				if err = tr.Start(adapter.StartStateStart); err != nil {
+					t.Fatal(err)
+				}
+				r, err := tr.Exchange(ctx, question())
+				if err != nil || r == nil || !r.Answer[0].(*mdns.A).A.Equal(net.IPv4(192, 0, 2, byte(winner+1))) {
+					t.Fatalf("winner %d: %v %v", winner, r, err)
+				}
+				if winner >= 3 && winner < count && p.udp.Load() == 0 || (winner < 3 || winner == count) && p.tcp.Load() == 0 {
+					t.Fatal("winner bypassed VPN detour")
+				}
+				wantFallback := int32(0)
+				if winner == count {
+					wantFallback = 1
+				}
+				if fallbackCalls.Load() != wantFallback {
+					t.Fatalf("fallback ran at the wrong time: got %d want %d", fallbackCalls.Load(), wantFallback)
+				}
+			})
+		}
+	}
+}
+
+// Exercise the registered constructor rather than a separate provider-count shim.
+func TestPrimaryServerCountBounds(t *testing.T) {
+	for _, count := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			options := Options{}
+			for range count {
+				endpoint := remote("127.0.0.1:53")
+				options.Servers = append(options.Servers, option.DNSServerOptions{Type: "udp", Options: &endpoint})
+			}
 			p := &proxy{Adapter: outbound.NewAdapter("test-vpn", "proxy", []string{"tcp", "udp"}, nil)}
 			ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &manager{proxy: p})
-			registry := dns.NewTransportRegistry()
-			transport.RegisterHTTPS(registry)
-			transport.RegisterUDP(registry)
-			transport.RegisterTCP(registry)
-			Register(registry)
-			ctx = service.ContextWith[option.DNSTransportOptionsRegistry](ctx, registry)
-			raw, err := json.MarshalContext(ctx, &option.DNSServerOptions{Type: Type, Tag: "dns-remote", Options: &opts})
-			if err != nil {
-				t.Fatal(err)
+			transport, err := New(ctx, log.NewNOPFactory().Logger(), "bounds", options)
+			if count < 2 || count > 7 {
+				if err == nil || !strings.Contains(err.Error(), "requires 2 to 7 primary servers") {
+					t.Fatalf("unexpected bounds result: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport.Close()
 			}
-			var parsed option.DNSServerOptions
-			if err = json.UnmarshalContext(ctx, raw, &parsed); err != nil {
-				t.Fatal(err)
+		})
+	}
+}
+
+func TestSevenProviderOptionsKeepTLSDetourAndTimeoutValidation(t *testing.T) {
+	for _, kind := range []string{"valid", "insecure", "missing-sni", "wrong-detour", "invalid-timeout"} {
+		t.Run(kind, func(t *testing.T) {
+			options := Options{}
+			for range 6 {
+				endpoint := remote("127.0.0.1:53")
+				options.Servers = append(options.Servers, option.DNSServerOptions{Type: "udp", Options: &endpoint})
 			}
-			tr, err := registry.CreateDNSTransport(ctx, log.NewNOPFactory().Logger(), parsed.Tag, parsed.Type, parsed.Options)
-			if err != nil {
-				t.Fatalf("construct: %v; wire=%s; options=%+v", err, raw, parsed.Options)
+			doh := option.RemoteHTTPSDNSServerOptions{Path: "/dns-query"}
+			doh.RemoteDNSServerOptions = remote("127.0.0.1:443")
+			doh.TLS = &option.OutboundTLSOptions{Enabled: true, ServerName: "dns.example"}
+			switch kind {
+			case "insecure":
+				doh.TLS.Insecure = true
+			case "missing-sni":
+				doh.TLS.ServerName = ""
+			case "wrong-detour":
+				doh.Detour = "direct"
+			case "invalid-timeout":
+				options.Timeout = -1
 			}
-			t.Cleanup(func() { tr.Close() })
-			if err = tr.Start(adapter.StartStateStart); err != nil {
-				t.Fatal(err)
+			options.Servers = append(options.Servers, option.DNSServerOptions{Type: "https", Options: &doh})
+			p := &proxy{Adapter: outbound.NewAdapter("test-vpn", "proxy", []string{"tcp", "udp"}, nil)}
+			ctx := service.ContextWith[adapter.OutboundManager](context.Background(), &manager{proxy: p})
+			transport, err := New(ctx, log.NewNOPFactory().Logger(), "validation", options)
+			if kind == "valid" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport.Close()
+				return
 			}
-			r, err := tr.Exchange(ctx, question())
-			if err != nil || r == nil || !r.Answer[0].(*mdns.A).A.Equal(net.IPv4(192, 0, 2, byte(winner+1))) {
-				t.Fatalf("winner %d: %v %v", winner, r, err)
-			}
-			if winner == 3 && p.udp.Load() == 0 || winner != 3 && p.tcp.Load() == 0 {
-				t.Fatal("winner bypassed VPN detour")
-			}
-			wantFallback := int32(0)
-			if winner == 4 {
-				wantFallback = 1
-			}
-			if fallbackCalls.Load() != wantFallback {
-				t.Fatalf("fallback ran at the wrong time: got %d want %d", fallbackCalls.Load(), wantFallback)
+			if err == nil {
+				transport.Close()
+				t.Fatal("seven-provider configuration bypassed validation")
 			}
 		})
 	}

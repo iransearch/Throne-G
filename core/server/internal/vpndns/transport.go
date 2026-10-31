@@ -20,7 +20,11 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
-const Type = "vpn-dns-race"
+const (
+	Type = "vpn-dns-race"
+	// Seven configured primaries plus the separately configured TCP fallback.
+	MaxPrimaryServers = 7
+)
 
 type Options struct {
 	Servers         []option.DNSServerOptions `json:"servers"`
@@ -51,8 +55,8 @@ type Transport struct {
 }
 
 func New(ctx context.Context, logger log.ContextLogger, tag string, options Options) (adapter.DNSTransport, error) {
-	if len(options.Servers) < 2 || len(options.Servers) > 4 {
-		return nil, errors.New("vpn-dns-race requires 2 to 4 primary servers")
+	if len(options.Servers) < 2 || len(options.Servers) > MaxPrimaryServers {
+		return nil, fmt.Errorf("vpn-dns-race requires 2 to %d primary servers", MaxPrimaryServers)
 	}
 	t := &Transport{TransportAdapter: dns.NewTransportAdapter(Type, tag, nil), logger: logger,
 		timeout: time.Duration(options.Timeout), fallbackTimeout: time.Duration(options.FallbackTimeout)}

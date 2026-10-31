@@ -152,3 +152,48 @@ func TestAndroidIPFailureWaitsForPrimaryDeadlineBeforeFallback(t *testing.T) {
 		t.Fatalf("IP stage deadline skipped: %v %v", ips, err)
 	}
 }
+
+func TestSeventhUDPProviderWinsIPLookupAndUsesItsOwnCache(t *testing.T) {
+	tr := fixture(t)
+	var queries, live atomic.Int32
+	for i := 0; i < 7; i++ {
+		i := i
+		kind := "udp"
+		if i < 3 {
+			kind = "https"
+		}
+		tr.children = append(tr.children, provider(string(rune('a'+i)), kind, func(ctx context.Context, q *mdns.Msg) (*mdns.Msg, error) {
+			live.Add(1)
+			defer live.Add(-1)
+			if i == 6 {
+				queries.Add(1)
+				return reply(q, i), nil
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}))
+	}
+	for i := 0; i < 3; i++ {
+		if i == 2 {
+			tr.DNSClearCache()
+		}
+		ips, err := tr.DNSLookup(context.Background(), "race.invalid", adapter.DNSQueryOptions{Strategy: C.DomainStrategyIPv4Only})
+		if err != nil || len(ips) != 1 || ips[0].String() != "192.0.2.7" {
+			t.Fatalf("seventh IP provider: %v %v", ips, err)
+		}
+		want := int32(1)
+		if i == 2 {
+			want = 2
+		}
+		if queries.Load() != want {
+			t.Fatalf("provider-owned cache: calls=%d want=%d", queries.Load(), want)
+		}
+	}
+	tr.Close()
+	if live.Load() != 0 {
+		t.Fatal("IP provider workers remained after close")
+	}
+	if tr.diagnostics.wins[6] != 3 || tr.diagnostics.cached != 1 || tr.diagnostics.wins[7] != 0 {
+		t.Fatal("seventh primary was misreported as fallback or lost its cache hit")
+	}
+}
