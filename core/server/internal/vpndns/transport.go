@@ -261,6 +261,7 @@ func (t *Transport) receive(ctx context.Context, message *mdns.Msg, results <-ch
 			if r.err == nil {
 				r.response.Id = message.Id
 				t.recordResult(r.tag, "raw-network", started, nil)
+				t.traceWinner(ctx, r.tag, "raw-network", nil)
 				if t.logger != nil {
 					t.logger.DebugContext(ctx, "VPN DNS winner=", r.tag, " elapsed_ms=", time.Since(started).Milliseconds())
 				}
@@ -277,6 +278,7 @@ func (t *Transport) rawExchange(ctx context.Context, message *mdns.Msg) (respons
 	defer func() {
 		if err != nil {
 			t.recordResult("", "raw-network", started, err)
+			t.traceWinner(ctx, "", "raw-network", err)
 		}
 	}()
 	ctx, cancel := context.WithCancel(ctx)

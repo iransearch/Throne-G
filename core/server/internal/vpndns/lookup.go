@@ -181,6 +181,7 @@ func (t *Transport) lookupResponses(parent context.Context, query *mdns.Msg, typ
 			source = "ip-cache"
 		}
 		t.recordResult(answer.tag, source, started, answer.err)
+		t.traceWinner(parent, answer.tag, source, answer.err)
 	}()
 	t.gate.Lock()
 	closed := t.closed

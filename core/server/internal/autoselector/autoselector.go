@@ -1,6 +1,7 @@
 package autoselector
 
 import (
+	"ThroneCore/internal/hostkeydiag"
 	"context"
 	"math/rand"
 	"net"
@@ -1607,7 +1608,9 @@ func (s *AutoSelector) DialContext(ctx context.Context, network string, destinat
 			break
 		}
 		tried[detour.Tag()] = true
+		started := time.Now()
 		conn, err := detour.DialContext(ctx, network, destination)
+		hostkeydiag.PoolAttempt(ctx, destination, s.Tag(), detour.Tag(), attempt, err, time.Since(started))
 		if err == nil {
 			s.noteDialResult(detour, N.NetworkName(network), nil)
 			return s.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
@@ -1634,7 +1637,9 @@ func (s *AutoSelector) ListenPacket(ctx context.Context, destination M.Socksaddr
 			break
 		}
 		tried[detour.Tag()] = true
+		started := time.Now()
 		conn, err := detour.ListenPacket(ctx, destination)
+		hostkeydiag.PoolAttempt(ctx, destination, s.Tag(), detour.Tag(), attempt, err, time.Since(started))
 		if err == nil {
 			s.noteDialResult(detour, N.NetworkUDP, nil)
 			return s.interruptGroup.NewPacketConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil

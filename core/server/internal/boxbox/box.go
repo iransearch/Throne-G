@@ -2,6 +2,7 @@ package boxbox
 
 import (
 	"ThroneCore/internal/autoselector"
+	"ThroneCore/internal/hostkeydiag"
 	"ThroneCore/internal/netdiag"
 	"ThroneCore/internal/vpndns"
 	"context"
@@ -60,7 +61,7 @@ type Box struct {
 	dnsTransport        *dns.TransportManager
 	dnsRouter           *dns.Router
 	connection          *route.ConnectionManager
-	router              *route.Router
+	router              adapter.Router
 	httpClientService   adapter.LifecycleService
 	internalService     []adapter.LifecycleService
 	done                chan struct{}
@@ -122,7 +123,7 @@ func New(options Options) (*Box, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx = netdiag.WithBox(ctx)
+	ctx = hostkeydiag.WithObserver(netdiag.WithBox(ctx))
 	netdiag.Emit("box-created", netdiag.Box(ctx), "")
 	ctx = service.ContextWithDefaultRegistry(ctx)
 
@@ -248,9 +249,10 @@ func New(options Options) (*Box, error) {
 	httpClientManager := httpclient.NewManager(ctx, logFactory.NewLogger("httpclient"), options.HTTPClients, routeOptions.DefaultHTTPClient)
 	service.MustRegister[adapter.HTTPClientManager](ctx, httpClientManager)
 	httpClientService := adapter.LifecycleService(httpClientManager)
-	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions)
+	routerImpl := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions)
+	router := hostkeydiag.ObserveRouter(routerImpl)
 	service.MustRegister[adapter.Router](ctx, router)
-	err = router.Initialize(routeOptions.Rules, routeOptions.RuleSet)
+	err = routerImpl.Initialize(routeOptions.Rules, routeOptions.RuleSet)
 	if err != nil {
 		return nil, E.Cause(err, "initialize router")
 	}

@@ -163,7 +163,7 @@ func TestProxyDestinationDNSAndShield(t *testing.T) {
 		return options
 	}
 	var primaries []any
-	for i := range 4 {
+	for i := range 7 {
 		primaries = append(primaries, newDNS(true, i))
 	}
 	dnsConfig := config["dns"].(map[string]any)
@@ -256,6 +256,7 @@ func TestProxyDestinationDNSAndShield(t *testing.T) {
 	}
 	for _, protocol := range []string{"socks", "http"} {
 		for _, test := range []struct{ domain, tag, address string }{
+			{"invapi.hostkey.com", "proxy", "192.0.2.9"},
 			{"allowed.example", "proxy", "192.0.2.9"}, {"chat.ai.example", "ai-proxy", "192.0.2.9"},
 			{"bootstrap.example.org", "proxy", "192.0.2.77"}, {"direct.example", "split-direct", ""},
 		} {

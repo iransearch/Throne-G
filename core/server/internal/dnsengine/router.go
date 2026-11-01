@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"ThroneCore/internal/hostkeydiag"
 	"context"
 	"errors"
 	"maps"
@@ -1196,16 +1197,15 @@ func (r *Router) exchangeLegacy(ctx context.Context, exchangeCtx *dnsExchangeCon
 	}
 }
 
-func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (*mDNS.Msg, error) {
+func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions) (response *mDNS.Msg, err error) {
+	ctx, diagnostic := hostkeydiag.StartDNSMessage(ctx, message, int(options.Strategy))
+	defer func() { diagnostic.FinishMessage(response, err) }()
 	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message)
 	if exchangeCtx == nil {
 		return earlyResponse, err
 	}
 	ctx = exchangeCtx.ctx
-	var (
-		response  *mDNS.Msg
-		transport adapter.DNSTransport
-	)
+	var transport adapter.DNSTransport
 	if options.Transport != nil {
 		transport = options.Transport
 		response, err = r.client.Exchange(ctx, transport, message, r.finalizeExchangeOptions(options), nil)
@@ -1223,6 +1223,14 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 }
 
 func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options adapter.DNSQueryOptions, callback func(response *mDNS.Msg, err error)) {
+	ctx, diagnostic := hostkeydiag.StartDNSMessage(ctx, message, int(options.Strategy))
+	if diagnostic != nil {
+		originalCallback := callback
+		callback = func(response *mDNS.Msg, err error) {
+			diagnostic.FinishMessage(response, err)
+			originalCallback(response, err)
+		}
+	}
 	exchangeCtx, earlyResponse, err := r.prepareExchange(ctx, message)
 	if exchangeCtx == nil {
 		callback(earlyResponse, err)
@@ -1255,7 +1263,9 @@ func (r *Router) finishExchangeAsync(message *mDNS.Msg, transport adapter.DNSTra
 	callback(response, nil)
 }
 
-func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
+func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) (responseAddrs []netip.Addr, err error) {
+	ctx, diagnostic := hostkeydiag.StartDNS(ctx, domain, 0, int(options.Strategy))
+	defer func() { diagnostic.Finish(responseAddrs, -1, err) }()
 	r.rulesAccess.RLock()
 	if r.closing {
 		r.rulesAccess.RUnlock()
@@ -1264,10 +1274,6 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 	rules := r.rules
 	legacyDNSMode := r.legacyDNSMode
 	r.rulesAccess.RUnlock()
-	var (
-		responseAddrs []netip.Addr
-		err           error
-	)
 	printResult := func() {
 		if err == nil && len(responseAddrs) == 0 {
 			err = E.New("empty result")

@@ -1,7 +1,9 @@
 package vpndns
 
 import (
+	"ThroneCore/internal/hostkeydiag"
 	"ThroneCore/internal/netdiag"
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -92,4 +94,18 @@ func (t *Transport) closeDiagnostics() {
 			netdiag.Emit("dns-race-summary", t.diagnosticBox(), t.diagnostics.counters())
 		}
 	})
+}
+
+func (t *Transport) traceWinner(ctx context.Context, tag, source string, err error) {
+	index := -1
+	for i, child := range t.children {
+		if tag != "" && child.Tag() == tag {
+			index = i
+			break
+		}
+	}
+	if tag != "" && t.fallback != nil && tag == t.fallback.Tag() {
+		index = len(t.children)
+	}
+	hostkeydiag.DNSWinner(ctx, index, source == "ip-cache", source, err)
 }
