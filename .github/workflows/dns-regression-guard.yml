@@ -1,0 +1,43 @@
+name: Core DNS Regression Guard
+
+on:
+  pull_request:
+    branches: [agent/core-startup-diagnostics-fix, update/fc668b60-core-only-1.3.0-beta.1]
+  push:
+    branches: [agent/core-startup-diagnostics-fix, update/fc668b60-core-only-1.3.0-beta.1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dns-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dns:
+    name: DNS race, TTL and routing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: core/server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: core/server/go.mod
+          cache-dependency-path: core/server/go.sum
+      - name: Run DNS and connection regressions with the race detector
+        run: go test -race ./internal/dnsengine ./internal/vpndns ./internal/boxmain ./internal/boxbox ./internal/netdiag ./internal/hostkeydiag ./internal/autoselector -count=1
+      - name: Check affected packages
+        run: go vet ./internal/dnsengine ./internal/vpndns ./internal/boxmain ./internal/boxbox ./internal/netdiag ./internal/hostkeydiag ./internal/autoselector
+      - name: Compile Windows DNS tests (execution requires Windows)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go test -c -o "$RUNNER_TEMP/dnsengine.test.exe" ./internal/dnsengine
+          go test -c -o "$RUNNER_TEMP/vpndns.test.exe" ./internal/vpndns

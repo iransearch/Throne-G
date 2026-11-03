@@ -41,6 +41,11 @@ options and cache bypass are retained per provider. ClearCache reaches these
 provider caches. Other DNS transports retain the original native paths.
 UDP has no implicit TCP retry and TCP sends no background reuse probes.
 
+Mixed record TTLs include zero: a CNAME with TTL=0 plus an A/AAAA with a
+positive TTL must not become a reusable provider-cache entry or acquire a
+positive TTL in a raw TUN response. OPT metadata is excluded from TTL selection;
+negative SOA lifetimes and explicit `rewrite_ttl` options retain their semantics.
+
 Register the transport before parsing in CLI/Check/RPC contexts. Box.New installs
 the local DNS router. The existing Core builder compiles these packages normally;
 go.mod/go.sum and dependency pins are unchanged. Rebuild the modern/legacy

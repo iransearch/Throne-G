@@ -211,7 +211,11 @@ func computeTimeToLive(response *dns.Msg) uint32 {
 			if record.Header().Rrtype == dns.TypeOPT {
 				continue
 			}
-			if timeToLive == 0 || record.Header().Ttl > 0 && record.Header().Ttl < timeToLive {
+			// A zero-TTL record makes the combined response non-cacheable.
+			if record.Header().Ttl == 0 {
+				return 0
+			}
+			if timeToLive == 0 || record.Header().Ttl < timeToLive {
 				timeToLive = record.Header().Ttl
 			}
 		}
