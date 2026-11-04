@@ -1,7 +1,7 @@
 # Native DNS client/router
 
 Source: https://github.com/throneproj/sing-box
-Commit: f154bec036c97fc998a7714bea9977bdc343780a
+Commit: f25a530dc468 (Throne 1.4.0-beta.6 dependency pin)
 License: GPL-3.0-or-later, retained in LICENSE.
 
 The client/router and their private helpers are copied from the exact pinned
@@ -9,7 +9,9 @@ dependency. The transport registry, manager and native wire transports remain
 aliases of that dependency. No go.mod/go.sum or external builder override is
 needed. Box.New installs this router as adapter.DNSRouter for the live core.
 
-Local changes are limited to managed_transport.go, client.go and router.go:
+The native files are refreshed from that pin, including the scoped router
+lifecycle and client changes. Local hooks remain in managed_transport.go,
+client.go and router.go:
 
 - Optional ManagedTransport hooks delegate raw queries and IP lookups separately.
 - A managed transport owns per-provider IP caches; the outer client never caches

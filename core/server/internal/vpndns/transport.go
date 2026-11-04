@@ -52,13 +52,14 @@ type Transport struct {
 	ipOnce          sync.Once
 	ipClient        *dns.Client
 	diagnostics     raceDiagnostics
+	scope           *adapter.Scope
 }
 
 func New(ctx context.Context, logger log.ContextLogger, tag string, options Options) (adapter.DNSTransport, error) {
 	if len(options.Servers) < 2 || len(options.Servers) > MaxPrimaryServers {
 		return nil, fmt.Errorf("vpn-dns-race requires 2 to %d primary servers", MaxPrimaryServers)
 	}
-	t := &Transport{TransportAdapter: dns.NewTransportAdapter(Type, tag, nil), logger: logger,
+	t := &Transport{TransportAdapter: dns.NewTransportAdapter(Type, tag, nil), logger: logger, scope: adapter.NewScope(ctx, logger),
 		timeout: time.Duration(options.Timeout), fallbackTimeout: time.Duration(options.FallbackTimeout)}
 	t.ctx, t.cancel = context.WithCancel(ctx)
 	if t.timeout == 0 {
@@ -149,9 +150,12 @@ func (t *Transport) all() []adapter.DNSTransport {
 	}
 	return children
 }
-func (t *Transport) Start(stage adapter.StartStage) error {
+func (t *Transport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(t.Close)
+	}
 	for _, child := range t.all() {
-		if err := child.Start(stage); err != nil {
+		if err := t.scope.Start(child.Tag(), child, stage); err != nil {
 			return err
 		}
 	}
@@ -165,12 +169,12 @@ func (t *Transport) Close() error {
 		t.cancel()
 	}
 	t.gate.Unlock()
-	var errs []error
-	for _, child := range t.all() {
-		errs = append(errs, child.Close())
+	var err error
+	if t.scope != nil {
+		err = t.scope.Close()
 	}
 	t.workers.Wait()
-	return errors.Join(errs...)
+	return err
 }
 func (t *Transport) Reset() {
 	for _, child := range t.all() {

@@ -25,9 +25,9 @@ type fake struct {
 	exchange func(context.Context, *mdns.Msg) (*mdns.Msg, error)
 }
 
-func (f *fake) Start(adapter.StartStage) error { return nil }
-func (f *fake) Close() error                   { return nil }
-func (f *fake) Reset()                         {}
+func (f *fake) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+func (f *fake) Close() error                                   { return nil }
+func (f *fake) Reset()                                         {}
 func (f *fake) Exchange(ctx context.Context, m *mdns.Msg) (*mdns.Msg, error) {
 	return f.exchange(ctx, m)
 }
@@ -191,12 +191,12 @@ func TestRealHTTPSRace(t *testing.T) {
 				t.Fatal(e)
 			}
 			defer func() {
-				tr.Close()
+				tr.(*Transport).Close()
 				for _, s := range servers {
 					s.Close()
 				}
 			}()
-			if e = tr.Start(adapter.StartStateStart); e != nil {
+			if e = tr.Start(adapter.StartStateStart, adapter.NewScope(context.Background(), log.NewNOPFactory().Logger())); e != nil {
 				t.Fatal(e)
 			}
 			r, e := tr.Exchange(context.Background(), question())
@@ -218,7 +218,7 @@ func TestRealHTTPSRace(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			defer broken.Close()
+			defer broken.(*Transport).Close()
 			if _, e = broken.Exchange(context.Background(), question()); e == nil {
 				t.Fatal("unverified TLS accepted")
 			}

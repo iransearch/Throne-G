@@ -145,8 +145,8 @@ func TestConfigurationAndRealVPNDetours(t *testing.T) {
 				if err != nil {
 					t.Fatalf("construct: %v; wire=%s; options=%+v", err, raw, parsed.Options)
 				}
-				t.Cleanup(func() { tr.Close() })
-				if err = tr.Start(adapter.StartStateStart); err != nil {
+				t.Cleanup(func() { tr.(*Transport).Close() })
+				if err = tr.Start(adapter.StartStateStart, adapter.NewScope(context.Background(), log.NewNOPFactory().Logger())); err != nil {
 					t.Fatal(err)
 				}
 				r, err := tr.Exchange(ctx, question())
@@ -188,7 +188,7 @@ func TestPrimaryServerCountBounds(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				transport.Close()
+				transport.(*Transport).Close()
 			}
 		})
 	}
@@ -223,11 +223,11 @@ func TestSevenProviderOptionsKeepTLSDetourAndTimeoutValidation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				transport.Close()
+				transport.(*Transport).Close()
 				return
 			}
 			if err == nil {
-				transport.Close()
+				transport.(*Transport).Close()
 				t.Fatal("seven-provider configuration bypassed validation")
 			}
 		})

@@ -17,6 +17,13 @@ the original policy. Existing connections are not closed by the rotation.
 
 Keep these source copies aligned when changing the pinned sing-box dependency.
 
+The 1.4.0-beta.6 port uses dependency f25a530dc468 while retaining the custom
+health/ranking/recovery algorithm above. Its adapter now implements scoped
+startup/cleanup, Selected/AttachConnection and References. Plain routed members
+delegate dials back through this selector, preserving round-robin, retries and
+offline guards. Attached streams retain the existing interrupt policy; all
+members remain referenced to preserve their previous idle-connection lifetime.
+
 After suspension/default-network changes, the main selector can repair failed
 Xray Hysteria2 clients through a callback bound to that profile before Start.
 Healthy members, the TUN, DNS and the box process stay intact. Each failed member

@@ -13,6 +13,7 @@ import (
 	"ThroneCore/internal/xraydns"
 	mdns "github.com/miekg/dns"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialer"
 	D "github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -75,15 +76,19 @@ func TestNativeAndXrayPinnedResolver(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			defer tr.Close()
+			defer tr.(*Transport).Close()
 			ctx = service.ContextWith[adapter.DNSTransportManager](ctx, &manager{transport: tr})
 			router, e := D.NewRouter(ctx, factory, option.DNSOptions{})
 			if e != nil {
 				t.Fatal(e)
 			}
-			defer router.Close()
+			scope := adapter.NewScope(ctx, factory.Logger())
+			defer scope.Close()
+			if e = scope.Start("dns", router, adapter.StartStateStart); e != nil {
+				t.Fatal(e)
+			}
 			ctx = service.ContextWith[adapter.DNSRouter](ctx, router)
-			native, e := adapter.DNSQueryOptionsFrom(ctx, &option.DomainResolveOptions{Server: "dns-direct"})
+			native, e := dialer.NewDNSQueryOptions(ctx, &option.DomainResolveOptions{Server: "dns-direct"}, false)
 			if e != nil {
 				t.Fatal(e)
 			}
