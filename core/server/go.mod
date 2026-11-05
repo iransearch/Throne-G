@@ -34,11 +34,13 @@ require (
 
 replace github.com/xtls/xray-core => github.com/throneproj/xray-core v1.251015.1-0.20261101081745-1c6eb7771c4d
 
-replace github.com/sagernet/sing-box => github.com/throneproj/sing-box v1.11.16-0.20261103115359-f25a530dc468
+replace github.com/sagernet/sing-box => github.com/throneproj/sing-box v1.11.16-0.20261105144313-6bc5c846150e
 
 replace github.com/sagernet/wireguard-go => github.com/throneproj/wireguard-go v0.0.0-20261031210827-e11787583013
 
 replace github.com/sagernet/sing => github.com/throneproj/sing v0.9.4-0.20261024082846-e3e392877db8
+
+replace github.com/metacubex/utls => github.com/throneproj/utls v1.8.8-0.20261105093534-f0ae7792aa1d
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect

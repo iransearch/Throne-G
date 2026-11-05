@@ -1,12 +1,26 @@
 # Custom desktop Core upstream baseline
 
-- Throne release: 1.4.0-beta.6 (pre-release)
-- Upstream commit: 4b1904e3252e4a99c25a91dbfc15b9c10fe77f1f
-- Previous upstream baseline: 1.3.1, 825b9809eb29b2a31fa29887abb7354cde54e9b7
-- Previous custom commit: 4219783d7bbdba28f334340c39288a6f9a02dac3
+- Throne release: 1.4.0 (stable)
+- Upstream commit: 99f7ecd1e7175d0b7073333b3f4e9fc2137b918e
+- Previous upstream baseline: 1.4.0-beta.6, 4b1904e3252e4a99c25a91dbfc15b9c10fe77f1f
+- Previous custom commit: 0bc087f1a3f88b89a10bcd4e0fd7cb9421caf0d8
 
 This is a core-only port onto the existing desktop layout, not a replacement
 with the upstream application's tree.
+
+## Core changes from beta.6 to 1.4.0
+
+The official tags differ under `core/` only in `go.mod` and `go.sum`.
+This port applies those dependency changes to `core/server`: sing-box
+`6bc5c846150e` carries the WARP MASQUE change, and uTLS `f0ae7792aa1d`
+fixes key-share selection for fingerprints with a secondary classical share.
+The Xray pin remains `1c6eb7771c4d`, which already includes the XHTTP cleanup
+fix in the beta.6 port.
+
+The existing desktop RPC transport, scoped Box lifecycle, custom DNS race,
+Pool routing and recovery, and Hysteria2 integration stay on the custom
+implementation described below. The builder's source layout and feature tags
+are preserved.
 
 ## Ported from 1.3.1 to 1.4.0-beta.6
 
@@ -44,13 +58,14 @@ Modern Core/GUI packaging must copy libcronet.dll from the selected
 github.com/sagernet/cronet-go/lib/windows_amd64 module, matching the new binding,
 instead of downloading an unrelated latest DLL. SGuard excludes Cronet.
 
-Source changes are in Throne-G on agent/core-startup-diagnostics-fix. Rebuild
-the native Core payloads with the existing builder, then package SGuard32/64 and
+The Core working branch is `agent/core-startup-diagnostics-fix`. The existing
+Windows builder fetches `update/fc668b60-core-only-1.3.0-beta.1` from Throne-G.
+Rebuild the native Core payloads with that builder, then package SGuard32/64 and
 SGuard7 variants using their existing feature sets. IRSPEEDY-WIN's runtime source
 and version are unchanged; its native-test overlay is adapted to the new lifecycle.
 Its Codegraph does not map this repository's Go internals.
 
-## Validation of this port
+## Validation of the beta.6 port
 
 - Passed: focused Core tests with `-race -tags with_quic`, including the root
   ProtoRPC/metadata tests, DNS client/race/probe, Box, pool/recovery, diagnostics
