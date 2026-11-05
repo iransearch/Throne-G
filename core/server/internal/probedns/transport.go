@@ -30,13 +30,14 @@ func Register(registry *dns.TransportRegistry) { dns.RegisterTransport[Options](
 type Transport struct {
 	dns.TransportAdapter
 	children []adapter.DNSTransport
+	scope    *adapter.Scope
 }
 
 func New(ctx context.Context, logger log.ContextLogger, tag string, options Options) (adapter.DNSTransport, error) {
 	if len(options.Servers) < 2 || len(options.Servers) > 4 {
 		return nil, errors.New("https-race requires 2 to 4 DoH servers")
 	}
-	t := &Transport{TransportAdapter: dns.NewTransportAdapter(Type, tag, nil)}
+	t := &Transport{TransportAdapter: dns.NewTransportAdapter(Type, tag, nil), scope: adapter.NewScope(ctx, logger)}
 	for i, o := range options.Servers {
 		// Literal endpoints and direct sockets avoid bootstrap DNS and proxy loops.
 		if _, err := netip.ParseAddr(o.Server); err != nil || o.Detour != "" || o.DomainResolver != nil || o.TLS == nil || !o.TLS.Enabled || o.TLS.Insecure || o.TLS.ServerName == "" {
@@ -52,20 +53,22 @@ func New(ctx context.Context, logger log.ContextLogger, tag string, options Opti
 	}
 	return t, nil
 }
-func (t *Transport) Start(stage adapter.StartStage) error {
+func (t *Transport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(t.Close)
+	}
 	for _, child := range t.children {
-		if err := child.Start(stage); err != nil {
+		if err := t.scope.Start(child.Tag(), child, stage); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 func (t *Transport) Close() error {
-	var errs []error
-	for _, child := range t.children {
-		errs = append(errs, child.Close())
+	if t.scope != nil {
+		return t.scope.Close()
 	}
-	return errors.Join(errs...)
+	return nil
 }
 func (t *Transport) Reset() {
 	for _, child := range t.children {

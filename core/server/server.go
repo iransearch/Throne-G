@@ -817,8 +817,8 @@ func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (out *gen.Que
 func connMetaToProto(c *trafficcontrol.TrackerMetadata) *gen.ConnectionMetaData {
 	process := ""
 	processPath := ""
-	if c.Metadata.ProcessInfo != nil {
-		processPath = c.Metadata.ProcessInfo.ProcessPath
+	if c.Metadata.ProcessInfo != nil && len(c.Metadata.ProcessInfo.ProcessPaths) > 0 {
+		processPath = c.Metadata.ProcessInfo.ProcessPaths[0]
 		spl := strings.Split(processPath, string(os.PathSeparator))
 		process = spl[len(spl)-1]
 	}

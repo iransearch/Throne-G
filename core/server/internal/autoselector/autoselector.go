@@ -3,6 +3,7 @@ package autoselector
 import (
 	"ThroneCore/internal/hostkeydiag"
 	"context"
+	"io"
 	"math/rand"
 	"net"
 	"sync"
@@ -141,6 +142,7 @@ type AutoSelector struct {
 	dialRetries     int
 
 	interruptGroup               *interrupt.Group
+	attachedGroup                *interrupt.Group
 	interruptExternalConnections bool
 
 	access     sync.Mutex
@@ -230,6 +232,7 @@ func NewAutoSelector(ctx context.Context, router adapter.Router, logger log.Cont
 		balanceInterval:              time.Duration(options.BalanceInterval),
 		dialRetries:                  options.DialRetries,
 		interruptGroup:               interrupt.NewGroup(),
+		attachedGroup:                interrupt.NewGroup(),
 		interruptExternalConnections: options.InterruptExistConnections,
 		members:                      make(map[string]*memberHealth, len(options.Outbounds)),
 		outbounds:                    make(map[string]adapter.Outbound, len(options.Outbounds)),
@@ -358,7 +361,19 @@ func (s *AutoSelector) applyDefaults() {
 	}
 }
 
-func (s *AutoSelector) Start() error {
+func (s *AutoSelector) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	switch stage {
+	case adapter.StartStateInitialize:
+		scope.Add(s.Close)
+	case adapter.StartStateStart:
+		return s.start()
+	case adapter.StartStateStarted:
+		return s.PostStart()
+	}
+	return nil
+}
+
+func (s *AutoSelector) start() error {
 	for i, tag := range s.tags {
 		detour, loaded := s.outbound.Outbound(tag)
 		if !loaded {
@@ -459,6 +474,43 @@ func (s *AutoSelector) Now() string {
 
 func (s *AutoSelector) All() []string {
 	return s.tags
+}
+
+// Keep the router's selected member dialling through the pool, so round-robin,
+// retries and network-availability guards still apply after group resolution.
+func (s *AutoSelector) Selected(network string) adapter.Outbound {
+	selected := s.selectedFor(network)
+	if selected == nil {
+		return nil
+	}
+	if _, group := selected.(adapter.OutboundGroup); group {
+		return selected
+	}
+	if _, flow := selected.(adapter.FlowOutbound); flow {
+		return selected
+	}
+	return &memberHandle{Outbound: selected, selector: s}
+}
+
+func (s *AutoSelector) AttachConnection(closer io.Closer) func() {
+	return s.attachedGroup.Add(closer, true)
+}
+
+// Preserve the existing pool's member lifetime policy. The new reference
+// manager must not close an otherwise healthy member between its probes.
+func (s *AutoSelector) References() []string { return s.tags }
+
+type memberHandle struct {
+	adapter.Outbound
+	selector *AutoSelector
+}
+
+func (h *memberHandle) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	return h.selector.DialContext(ctx, network, destination)
+}
+
+func (h *memberHandle) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	return h.selector.ListenPacket(ctx, destination)
 }
 
 // SelectOutbound pins the group to one member, as the clash API's group
@@ -1357,6 +1409,9 @@ func (s *AutoSelector) setSelectedLocked(detour adapter.Outbound, network string
 		s.logger.Info("auto-selector: ", network, " ", previous.Tag(), " -> ", detour.Tag(), " (", reason, ")")
 		if interruptExisting {
 			s.interruptGroup.Interrupt(s.interruptExternalConnections)
+			if s.interruptExternalConnections && s.attachedGroup != nil {
+				s.attachedGroup.Interrupt(true)
+			}
 		}
 	}
 }
@@ -1657,12 +1712,12 @@ func (s *AutoSelector) ListenPacket(ctx context.Context, destination M.Socksaddr
 }
 
 func (s *AutoSelector) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	s.connection.NewConnection(ctx, s, conn, metadata, onClose)
 }
 
 func (s *AutoSelector) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
 }
 

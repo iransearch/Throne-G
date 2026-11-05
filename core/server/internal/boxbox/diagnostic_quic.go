@@ -49,7 +49,12 @@ func (d *diagnosticHysteria2) InterfaceUpdated(ctx context.Context) {
 	netdiag.Emit("hy2-reset", d.boxID, d.fields()+" reason="+netdiag.ResetSource()+" context="+netdiag.ContextState(ctx))
 	d.Outbound.InterfaceUpdated(ctx)
 }
-func (d *diagnosticHysteria2) Close() error {
-	netdiag.Emit("hy2-close", d.boxID, d.fields()+" reason=outbound-close")
-	return d.Outbound.Close()
+func (d *diagnosticHysteria2) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(func() error {
+			netdiag.Emit("hy2-close", d.boxID, d.fields()+" reason=outbound-close")
+			return nil
+		})
+	}
+	return d.Outbound.Start(stage, scope)
 }

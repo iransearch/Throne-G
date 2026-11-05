@@ -45,7 +45,7 @@ func newUDP(ctx context.Context, tag string, options option.RemoteDNSServerOptio
 	t.network = "udp"
 	return t, nil
 }
-func (t *singleWire) Start(stage adapter.StartStage) error {
+func (t *singleWire) Start(stage adapter.StartStage, _ *adapter.Scope) error {
 	if stage == adapter.StartStateStart {
 		return dialer.InitializeDetour(t.dialer)
 	}

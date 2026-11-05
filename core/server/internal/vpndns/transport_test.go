@@ -21,9 +21,9 @@ type fake struct {
 	exchange func(context.Context, *mdns.Msg) (*mdns.Msg, error)
 }
 
-func (f *fake) Start(adapter.StartStage) error { return nil }
-func (f *fake) Close() error                   { return nil }
-func (f *fake) Reset()                         {}
+func (f *fake) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+func (f *fake) Close() error                                   { return nil }
+func (f *fake) Reset()                                         {}
 func (f *fake) Exchange(ctx context.Context, q *mdns.Msg) (*mdns.Msg, error) {
 	return f.exchange(ctx, q)
 }
